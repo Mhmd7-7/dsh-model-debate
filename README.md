@@ -38,13 +38,6 @@ The equivalent **`plugin_manager` tool call** is below. This JSON is **not a ter
 {"action":"install_bundle","target":"github:Mhmd7-7/dsh-model-debate"}
 ```
 
-### التثبيت بالعربية
-
-1. افتح واجهة **DeepSeek Harness** ثم **Plugins → Add / Install**.
-2. انسخ `github:Mhmd7-7/dsh-model-debate` إلى حقل التثبيت واضغط **Install**، ثم فعّل **Model Debate** إذا طُلب ذلك.
-3. حدّث الصفحة بعد نجاح التفعيل. إذا ظهر `restart-required`، أعد تشغيل ملف DSH الشخصي أولًا.
-4. افتح **Debate / المناظرة**، واختر نموذجين أو أكثر من الإعدادات، ثم أرسل سؤالك. لا تحتاج إلى تنزيل المشروع أو بنائه يدويًا بهذه الطريقة.
-
 ### Open the installed plugin
 
 Use your existing DSH Web GUI (for example **http://127.0.0.1:3080**), not a separate development server. The Debate panel includes its own switch back to Chat.
@@ -105,7 +98,7 @@ Saved sessions retain image references and normalized-image previews across relo
 1. Choose **New Debate** and open **Settings**.
 2. Enable 2–20 distinct **provider/model** identities from the active DSH catalog. Four are selected initially when available; two or three are used if that is all the catalog offers. With fewer than two, configure additional routes in DSH Settings → Models. No IDs are invented or silently substituted.
 3. Reorder participants, choose optional visible roles/instructions and supported generation controls. Select a reviewer from the same models or another advertised model. No additional paid reviewer is required.
-4. Enter an English or Arabic question and **Start debate**. Interface language uses DSH's locale service; Arabic is available as العربية. Mixed-language messages use automatic text direction and isolated identities.
+4. Enter an English or Arabic question and **Start debate**. Interface language uses DSH's locale service; English and Arabic are supported. Mixed-language messages use automatic text direction and isolated identities.
 5. Watch stage/overall timers, statuses and incomplete streaming previews. Expand structured claims, objections, original provider output, issues and exact request/configuration details.
 6. **Stop** cancels outstanding work and never launches review. Use **Review available discussion** separately if wanted. Final review can fail; that produces an explicit warning rather than a fabricated verdict.
 7. Copy the final answer, export Markdown/JSON, rename/delete inactive sessions, or re-run into a **new** session. Applying/editing settings affects future runs only.
