@@ -76,6 +76,20 @@ window.__ModuleLoader__.load({
         let polling: ReturnType<typeof setInterval> | undefined;
         let flight: Promise<void> | null = null;
         let composeDraft = '';
+        // Closure-owned and session-keyed: drafts survive Chat/Debate slot unmounts.
+        const followUpDrafts = new Map<string, string>();
+        const followUpPending = new Set<string>();
+        const followUpListeners = new Set<() => void>();
+        const MAX_FOLLOW_UP_DRAFTS = 30;
+        const MAX_FOLLOW_UP_CHARS = 30000;
+        const publishFollowUps = () => { if (alive) followUpListeners.forEach(listener => listener()); };
+        const subscribeFollowUps = (listener: () => void) => { followUpListeners.add(listener); return () => { followUpListeners.delete(listener); }; };
+        function setFollowUpDraft(id: string, text: string) {
+          followUpDrafts.delete(id);
+          if (text) followUpDrafts.set(id, text.slice(0, MAX_FOLLOW_UP_CHARS));
+          while (followUpDrafts.size > MAX_FOLLOW_UP_DRAFTS) followUpDrafts.delete(followUpDrafts.keys().next().value!);
+          publishFollowUps();
+        }
         let settingsDraft: Settings | null = null;
         let settingsBaseline: string | null = null;
         // Plugin-owned draft survives switching between the Chat and Debate slots.
@@ -163,7 +177,7 @@ window.__ModuleLoader__.load({
         const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
         ctx.effect(() => {
           void refresh();
-          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; listeners.clear(); };
+          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; followUpDrafts.clear(); followUpPending.clear(); followUpListeners.clear(); listeners.clear(); };
         });
         function useLocale() { return useSyncExternalStore(fn => ctx.locale.subscribe(fn), () => ctx.locale.getSnapshot(), () => ctx.locale.getSnapshot()); }
         function Icon({ name = 'debate', size = 18 }: { name?: string; size?: number }) {
@@ -255,8 +269,9 @@ window.__ModuleLoader__.load({
           useEffect(() => { if (!running) return; const timer = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(timer); }, [running]);
           const at = running ? now : session.endedAt || session.updatedAt;
           const duration = (ms: number) => { const seconds = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; };
-          const percent = Math.min(100, Math.max(0, (at - session.startedAt) / Math.max(1, session.deadline - session.startedAt) * 100));
-          return <div className="mdb-timers"><div className="mdb-timer-pills"><span><Icon name="clock" size={15}/>{t('Elapsed')} <b dir="ltr">{duration(at - session.startedAt)}</b></span>{running && <><span>{t('Overall remaining')} <b dir="ltr">{duration(session.deadline - now)}</b></span><span>{t('Stage remaining')} <b dir="ltr">{duration(session.stageDeadline - now)}</b></span></>}</div><div className="mdb-progress" role="progressbar" aria-label={t('Overall deadline')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(percent)}><span style={{ width: `${percent}%` }}/></div></div>;
+          const cycleStartedAt = session.followUps?.at(-1)?.timestamp ?? session.startedAt;
+          const percent = Math.min(100, Math.max(0, (at - cycleStartedAt) / Math.max(1, session.deadline - cycleStartedAt) * 100));
+          return <div className="mdb-timers"><div className="mdb-timer-pills"><span><Icon name="clock" size={15}/>{t('Elapsed')} <b dir="ltr">{duration(at - cycleStartedAt)}</b></span>{running && <><span>{t('Overall remaining')} <b dir="ltr">{duration(session.deadline - now)}</b></span><span>{t('Stage remaining')} <b dir="ltr">{duration(session.stageDeadline - now)}</b></span></>}</div><div className="mdb-progress" role="progressbar" aria-label={t('Overall deadline')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(percent)}><span style={{ width: `${percent}%` }}/></div></div>;
         }
         function MessageCard({ message: m, session }: { message: DebateMessage; session: DebateSession }) {
           const [quote, setQuote] = useState<string | null>(null);
@@ -314,10 +329,29 @@ window.__ModuleLoader__.load({
           const input = useRef<HTMLInputElement>(null);
           return <section className="mdb-image-composer" aria-label={t('Question images')} aria-busy={images.reading}><input ref={input} className="mdb-sr-only" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" aria-label={t('Add images')} disabled={busy || images.reading || !policy.available} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; void addImageFiles(files, policy); }}/><div className="mdb-image-toolbar"><Button icon="image" disabled={busy || images.reading || !policy.available} onClick={() => input.current?.click()}>{t('Add images')}</Button><small>{t('Image limits', { count: policy.maxImages, each: formatBytes(policy.maxImageBytes, locale.active), total: formatBytes(policy.maxTotalBytes, locale.active) })}</small>{images.images.length > 0 && <Button disabled={busy || images.reading} onClick={() => publishImageDraft({ images: [], reading: false, error: null })}>{t('Clear images')}</Button>}</div>{!policy.available && <small>{t('Images unavailable')}</small>}{images.images.length > 0 && <><div className="mdb-image-grid">{images.images.map((image, index) => <figure className="mdb-draft-image" key={image.id}><img src={image.preview} alt={image.encoded.name || `${t('Image')} ${index + 1}`}/><figcaption><strong dir="auto">{image.encoded.name || `${t('Image')} ${index + 1}`}</strong><small>{formatBytes(image.bytes, locale.active)}</small></figcaption><IconButton label={`${t('Remove image')}: ${image.encoded.name || index + 1}`} icon="close" disabled={busy || images.reading} onClick={() => publishImageDraft({ ...imageDraft, images: imageDraft.images.filter(item => item.id !== image.id), error: null })}/></figure>)}</div><p className="mdb-image-summary">{t('Image selection summary', { count: images.images.length, size: formatBytes(images.images.reduce((sum, image) => sum + image.bytes, 0), locale.active) })}</p></>}<p className="mdb-image-privacy">{t('Image privacy note')}</p><small>{t('Image input hint')}</small>{images.reading && <p role="status" aria-live="polite">{t('Reading images')}</p>}{images.error && <p className="mdb-error-text" role="alert">{images.error}</p>}</section>;
         }
+        function FollowUpComposer({ session, busy, act, notify }: { session: DebateSession; busy: boolean; act(action: string, fields?: Record<string, unknown>): Promise<any>; notify(message: string): void }) {
+          const draft = useSyncExternalStore(subscribeFollowUps, () => followUpDrafts.get(session.id) || '', () => '');
+          const sending = useSyncExternalStore(subscribeFollowUps, () => followUpPending.has(session.id), () => false);
+          const id = useId();
+          const running = activeRun(session);
+          const disabled = busy || running || sending;
+          const send = async () => {
+            const text = (followUpDrafts.get(session.id) || '').trim();
+            if (busy || activeRun(session) || followUpPending.has(session.id) || !text) return;
+            followUpPending.add(session.id); publishFollowUps();
+            try {
+              const result = await act('followup', { id: session.id, message: text });
+              // Only an accepted action clears this session's draft, including after unmount.
+              if (result) setFollowUpDraft(session.id, '');
+            } catch { notify(t('Follow-up send failed')); }
+            finally { followUpPending.delete(session.id); publishFollowUps(); }
+          };
+          return <form className="mdb-followup-composer" aria-labelledby={`${id}-title`} aria-busy={sending} onSubmit={event => { event.preventDefault(); void send(); }}><header><span className="mdb-followup-mark"><Icon name="debate"/></span><div><h2 id={`${id}-title`}>{t('Continue this debate')}</h2><p id={`${id}-context`}>{t('Follow-up context hint')}</p></div></header><label className="mdb-sr-only" htmlFor={id}>{t('Your follow-up')}</label><textarea id={id} dir="auto" rows={3} maxLength={MAX_FOLLOW_UP_CHARS} value={draft} disabled={disabled} aria-describedby={`${id}-context ${id}-hint`} placeholder={t('Follow-up placeholder')} onChange={event => setFollowUpDraft(session.id, event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !event.repeat) { event.preventDefault(); void send(); } }}/><footer><small id={`${id}-hint`} role={running ? 'status' : undefined}>{t(running ? 'Follow-up wait' : 'Follow-up keyboard hint')}</small><button type="submit" className="mdb-button mdb-button-primary" disabled={disabled || !draft.trim()}><Icon name={sending ? 'clock' : 'play'}/><span>{t(sending ? 'Sending follow-up' : 'Send follow-up')}</span></button></footer><small className="mdb-followup-resource-note">{t('Follow-up resource hint')}</small>{session.images?.length > 0 && <small>{t('Follow-up image hint')}</small>}</form>;
+        }
         function SessionView({ session: s, busy, act, onDialog, onLoad, notify }: { session: DebateSession; busy: boolean; act(action: string, fields?: Record<string, unknown>): Promise<any>; onDialog(value: DialogState): void; onLoad(settings: Settings): void; notify(message: string): void }) {
           const [copied, setCopied] = useState(false);
           const running = activeRun(s);
-          useEffect(() => { setCopied(false); }, [s.id]);
+          useEffect(() => { setCopied(false); }, [s.id, s.final?.timestamp]);
           const copy = async () => { try { await navigator.clipboard.writeText(s.final?.text || ''); setCopied(true); } catch { notify(t('Browser copy failed')); } };
           const exportRun = async (format: 'json' | 'markdown') => {
             const result = await act('export', { id: s.id, format }) as { filename: string; content: string; mime: string } | null;
@@ -325,13 +359,18 @@ window.__ModuleLoader__.load({
             const url = URL.createObjectURL(new Blob([result.content], { type: result.mime }));
             const a = document.createElement('a'); a.href = url; a.download = result.filename; a.click(); URL.revokeObjectURL(url);
           };
-          let previousRound: number | undefined;
-          return <div className="mdb-session-view"><section className="mdb-run-heading"><div className="mdb-toolbar mdb-toolbar-wrap"><Status status={s.status}/><span className="mdb-muted">{t('Round')} {s.round}/{s.settings.rounds} · {t('Stage')}: {t(s.stage)}</span></div><h1 dir="auto">{s.title}</h1><details className="mdb-question-detail" open={s.question.length < 350}><summary>{t('Question label')}</summary><Plain>{s.question}</Plain></details><SessionImages session={s}/><Countdown session={s}/><div className="mdb-run-actions"><div className="mdb-toolbar mdb-toolbar-wrap">{running ? <Button icon="stop" className="mdb-button-danger" disabled={busy} onClick={() => onDialog({ kind: 'stop', id: s.id })}>{t('Stop')}</Button> : <><Button icon="spark" className="mdb-button-primary" title={t('Review hint')} disabled={busy || !s.messages.length} onClick={() => { void act('review', { id: s.id }); }}>{t('Review now')}</Button><Button icon="retry" title={t('Run again hint')} disabled={busy} onClick={() => { void act('rerun', { id: s.id }); }}>{t('Run again')}</Button></>}<details className="mdb-export"><summary><Icon name="download" size={16}/>{t('Export')}</summary><div><Button disabled={busy} onClick={() => { void exportRun('json'); }}>{t('Export JSON')}</Button><Button disabled={busy} onClick={() => { void exportRun('markdown'); }}>{t('Export Markdown')}</Button></div></details></div><small>{s.messages.length} {t('Messages')}</small></div>{s.stopReason && <Plain className="mdb-stop-reason">{s.stopReason}</Plain>}</section>
+          const followUps = s.followUps || [];
+          const reviews = s.reviews || [];
+          const cycleRound = Math.max(0, s.round - (followUps.at(-1)?.startRound ?? 1) + 1);
+          // Include empty rounds so a follow-up stays visible even if no model replied.
+          const transcriptRounds = Array.from(new Set([...s.messages.map(message => message.round), ...followUps.map(followUp => followUp.startRound), ...reviews.map(review => review.afterRound)])).sort((a, b) => a - b);
+          return <div className="mdb-session-view"><section className="mdb-run-heading"><div className="mdb-toolbar mdb-toolbar-wrap"><Status status={s.status}/><span className="mdb-muted">{t('Round')} {cycleRound}/{s.settings.rounds} · {t('Stage')}: {t(s.stage)}</span></div><h1 dir="auto">{s.title}</h1><details className="mdb-question-detail" open={s.question.length < 350}><summary>{t('Question label')}</summary><Plain>{s.question}</Plain></details><SessionImages session={s}/><Countdown session={s}/><div className="mdb-run-actions"><div className="mdb-toolbar mdb-toolbar-wrap">{running ? <Button icon="stop" className="mdb-button-danger" disabled={busy} onClick={() => onDialog({ kind: 'stop', id: s.id })}>{t('Stop')}</Button> : <><Button icon="spark" className="mdb-button-primary" title={t('Review hint')} disabled={busy || !s.messages.length} onClick={() => { void act('review', { id: s.id }); }}>{t('Review now')}</Button><Button icon="retry" title={t('Run again hint')} disabled={busy} onClick={() => { void act('rerun', { id: s.id }); }}>{t('Run again')}</Button></>}<details className="mdb-export"><summary><Icon name="download" size={16}/>{t('Export')}</summary><div><Button disabled={busy} onClick={() => { void exportRun('json'); }}>{t('Export JSON')}</Button><Button disabled={busy} onClick={() => { void exportRun('markdown'); }}>{t('Export Markdown')}</Button></div></details></div><small>{s.messages.length} {t('Messages')}</small></div>{s.stopReason && <Plain className="mdb-stop-reason">{s.stopReason}</Plain>}</section>
             {s.final ? <section className="mdb-final"><header><div className="mdb-final-title"><span className="mdb-final-mark"><Icon name="spark" size={22}/></span><div><h2>{t('Final answer')}</h2><small dir="auto">{s.final.model} · {s.final.provider}</small></div></div><Button icon={copied ? 'check' : 'copy'} onClick={() => { void copy(); }}>{t(copied ? 'Copied' : 'Copy final')}</Button></header>{s.final.incomplete && <span className="mdb-badge mdb-badge-warn">{t('Incomplete')}</span>}<Plain>{s.final.text}</Plain><footer>{t('Final caveat')}</footer></section> : !running && <section className="mdb-no-final"><Icon name="spark"/><div><h3>{t('No final')}</h3><p>{t('No final hint')}</p></div></section>}
             {s.reviewError && <div className="mdb-alert mdb-alert-error"><Icon name="alert"/><div><strong>{t('Reviewer error')}</strong><Plain>{s.reviewError}</Plain></div></div>}
             <TaskActivity session={s}/><Issues session={s}/>
-            <details className="mdb-transcript" open={!s.final}><summary><h2>{t('Transcript')}</h2><span className="mdb-count">{s.messages.length}</span></summary>{s.messages.length === 0 && <div className="mdb-empty-transcript"><span className="mdb-orbit"><Icon size={28}/></span><h3>{t('Awaiting contributions')}</h3><p>{t('Awaiting hint')}</p></div>}{s.messages.map(message => { const separator = previousRound !== message.round; previousRound = message.round; return <React.Fragment key={message.id}>{separator && <div className="mdb-round-separator"><span>{t('Round')} {message.round}</span><i/></div>}<MessageCard message={message} session={s}/></React.Fragment>; })}</details>
+            <details className="mdb-transcript" open={!s.final}><summary><h2>{t('Transcript')}</h2><span className="mdb-count">{s.messages.length}</span></summary>{s.messages.length === 0 && <div className="mdb-empty-transcript"><span className="mdb-orbit"><Icon size={28}/></span><h3>{t('Awaiting contributions')}</h3><p>{t('Awaiting hint')}</p></div>}{transcriptRounds.map(round => <React.Fragment key={round}><div className="mdb-round-separator"><span>{t('Round')} {round}</span><i/></div>{followUps.filter(followUp => followUp.startRound === round).map(followUp => <article key={followUp.id} className="mdb-followup-message"><header><span className="mdb-badge">{t('You')}</span><strong>{t('Follow-up message')}</strong><time dateTime={new Date(followUp.timestamp).toISOString()}>{new Date(followUp.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time></header><Plain>{followUp.text}</Plain></article>)}{s.messages.filter(message => message.round === round).map(message => <MessageCard key={message.id} message={message} session={s}/>)}{reviews.filter(review => review.afterRound === round).map((review, index) => <details className="mdb-prior-review" key={`${review.timestamp}-${index}`}><summary><Icon name="spark" size={16}/><span>{t('Previous synthesis')}</span><small dir="auto">{review.model} · {review.provider}</small></summary><header><time dateTime={new Date(review.timestamp).toISOString()}>{new Date(review.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time>{review.incomplete && <span className="mdb-badge mdb-badge-warn">{t('Incomplete')}</span>}</header><Plain>{review.text}</Plain><small>{t('Final caveat')}</small></details>)}</React.Fragment>)}</details>
             <details className="mdb-run-details"><summary>{t('Run details')}</summary><div className="mdb-usage"><h3>{t('Usage')}</h3><dl><div><dt>{t('Input tokens')}</dt><dd>{s.usage.inputTokens.toLocaleString()}</dd></div><div><dt>{t('Output tokens')}</dt><dd>{s.usage.outputTokens.toLocaleString()}</dd></div><div><dt>{t('Budget accounted')}</dt><dd>{s.budgetUsed.toLocaleString()}{s.budgetEstimated && <small> · {t('Estimated')}</small>}</dd></div></dl>{s.usageUnavailable && <small>{t('Usage unavailable')}</small>}{s.compression.length > 0 && <p>{t('Context compressed')} · {s.compression.length} {t('Compression events')}</p>}</div><details><summary>{t('Original settings')}</summary><p>{t('Original settings hint')}</p><Button onClick={() => onLoad(s.settings)}>{t('Load run settings')}</Button><pre dir="ltr">{JSON.stringify(s.settings, null, 2)}</pre></details><details><summary>{t('Tasks')}</summary>{s.requests.map((item, index) => <details key={`${item.taskId}-${index}`}><summary dir="auto">{item.config.model} · {t('Attempt')} {item.attempt}</summary><Plain>{item.system}</Plain><Plain>{item.prompt}</Plain><pre dir="ltr">{JSON.stringify(item.config, null, 2)}</pre></details>)}</details></details>
+            <FollowUpComposer session={s} busy={busy} act={act} notify={notify}/>
           </div>;
         }
         function Dialog({ state, busy, onClose, onConfirm }: { state: NonNullable<DialogState>; busy: boolean; onClose(): void; onConfirm(value: string): Promise<void> }) {
@@ -401,6 +440,8 @@ window.__ModuleLoader__.load({
             try {
               const result = await request<any>(action, fields);
               if (action === 'start' && result?.id) publishImageDraft({ images: [], reading: false, error: null });
+              // Acceptance is independent of a later snapshot refresh; do not leave an already-sent message in the draft.
+              if (action === 'followup' && result?.id) setFollowUpDraft(result.id, '');
               if (['start', 'rerun'].includes(action) && result?.id) await request('select', { id: result.id });
               if (action !== 'export') await refresh(true);
               return result === undefined ? true : result;

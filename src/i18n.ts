@@ -1,5 +1,12 @@
 export const namespace = 'model-debate';
 export const en: Record<string, string> = {
+  'Follow-up discussion': 'Follow-up discussion',
+  'Continue this debate': 'Continue this debate', 'Your follow-up': 'Your follow-up', 'Follow-up placeholder': 'Add information, ask a follow-up, or challenge the answer…',
+  'Follow-up context hint': 'Continue with the same models, original settings, and saved discussion.', 'Follow-up keyboard hint': 'New line: Enter · Send: Ctrl/⌘ + Enter',
+  'Follow-up wait': 'Wait for this cycle to finish, or use Stop, before sending another message. Your draft is kept.',
+  'Follow-up resource hint': 'Sending starts a new bounded cycle with the original round, time, and usage limits. Model-provider resources are consumed and may be billed.',
+  'Follow-up image hint': 'The original saved images are included again. Follow-ups accept text only.', 'Send follow-up': 'Send follow-up', 'Sending follow-up': 'Sending…',
+  'Follow-up send failed': 'Could not send your follow-up. Your draft is kept; please try again.', 'Follow-up message': 'Follow-up', You: 'You', 'Previous synthesis': 'Previous synthesis',
   'Vision supported': 'Vision supported', 'Text-only model': 'Text-only', 'Image support unknown': 'Image support unknown',
   'Add images': 'Add images', 'Clear images': 'Clear all images', 'Remove image': 'Remove image', Image: 'Image', 'Question images': 'Question images', 'Expand image': 'Expand image', 'Original dimensions': 'Original dimensions',
   'Images unavailable': 'Image inputs are unavailable under the current host policy.', 'Image type error': 'No images were added. Every selected file must be an allowed PNG, JPEG, WebP, or GIF image.',
@@ -52,6 +59,13 @@ export const en: Record<string, string> = {
   'Diagnostics': 'Host diagnostics', 'Run details': 'Run details', 'No text': 'No readable text returned.', 'Export ready': 'Download export', 'Browser copy failed': 'Clipboard unavailable. Select and copy the final text manually.', 'Untitled debate': 'Untitled debate', 'Not set': 'Not set',
 };
 export const ar: Record<string, string> = {
+  'Follow-up discussion': 'نقاش المتابعة',
+  'Continue this debate': 'تابع هذه المناظرة', 'Your follow-up': 'رسالتك للمتابعة', 'Follow-up placeholder': 'أضف معلومات، أو اطرح سؤال متابعة، أو ناقش الإجابة…',
+  'Follow-up context hint': 'تابع مع النماذج نفسها والإعدادات الأصلية وسجل النقاش المحفوظ.', 'Follow-up keyboard hint': 'Enter لسطر جديد · Ctrl/⌘ + Enter للإرسال',
+  'Follow-up wait': 'انتظر انتهاء الدورة الحالية، أو اضغط «إيقاف»، قبل إرسال رسالة أخرى. تبقى مسودتك محفوظة.',
+  'Follow-up resource hint': 'يبدأ الإرسال دورة جديدة محدودة بحدود الجولات والوقت والاستخدام الأصلية. تُستهلك موارد مزوّدي النماذج وقد تُحتسب رسوم.',
+  'Follow-up image hint': 'تُرسل الصور الأصلية المحفوظة مجددًا. تقبل المتابعة النص فقط.', 'Send follow-up': 'إرسال المتابعة', 'Sending follow-up': 'جارٍ الإرسال…',
+  'Follow-up send failed': 'تعذّر إرسال المتابعة. مسودتك محفوظة؛ أعد المحاولة.', 'Follow-up message': 'رسالة متابعة', You: 'أنت', 'Previous synthesis': 'الخلاصة السابقة',
   'Vision supported': 'يدعم الصور', 'Text-only model': 'نصوص فقط', 'Image support unknown': 'دعم الصور غير معروف',
   'Add images': 'إضافة صور', 'Clear images': 'مسح كل الصور', 'Remove image': 'إزالة الصورة', Image: 'صورة', 'Question images': 'صور السؤال', 'Expand image': 'توسيع الصورة', 'Original dimensions': 'الأبعاد الأصلية',
   'Images unavailable': 'إدخال الصور غير متاح وفق سياسة المضيف الحالية.', 'Image type error': 'لم تُضف أي صور. يجب أن يكون كل ملف مختار صورة PNG أو JPEG أو WebP أو GIF مسموحًا بها.',

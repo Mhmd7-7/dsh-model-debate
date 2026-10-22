@@ -45,6 +45,18 @@ The directory is linked by local installation: keep it available. To update buil
 
 To uninstall, use DSH Plugins → Model Debate → Remove, or `plugin_manager` action `remove_bundle` with target `@local/dsh-model-debate`. Plugin-owned saved discussions are not silently erased on uninstall.
 
+## Keep talking after the result (version 1.2)
+
+A result no longer closes the conversation. At the end of a saved debate, use **Continue the conversation** to send a new question, correction, or additional information. Every participant responds to your latest message with the original question, previous discussion, all prior user additions, and earlier reviews in context. The reviewer then updates the synthesis. Your message and the new replies remain in the **same debate**; earlier answers and reviews are retained, not overwritten.
+
+* Wait until the current cycle finishes, or press **Stop**, before sending the next message.
+* Each follow-up starts a fresh bounded cycle using the debate's saved participants/settings and original images. Time, reply limits and optional token allowance apply **per cycle**; usage and exact request logs remain cumulative. It spends provider resources again.
+* Follow-ups are text-only in this version. The original uploaded images remain attached on every turn. To change participants/settings or add different images, start a new debate.
+* Up to **30 follow-ups**, **30,000 characters each**, within the saved shared-context budget. User additions and previous reviews are never silently removed to fit: if the preserved context is too large, sending fails visibly without adding the message.
+* A failed/partial follow-up cannot inherit `completed` status from a previous successful cycle. Stop still cancels without launching a review. Re-run starts a fresh debate retaining the original question, images, and all user additions, but not previous model answers.
+
+The agent operation is `model_debate` with `{"action":"followup","id":"…","message":"Here is some additional information…"}`. The GUI uses the same operation.
+
 ## Image questions (version 1.1)
 
 Use **Add images**, paste an image into the composer, or drop image files onto it. PNG, JPEG, WebP and GIF are supported. Review/remove thumbnails before starting. The plugin accepts up to **4 images**, **10 MiB per image**, **20 MiB total**, further restricted by the current DSH attachment policy. A nonempty question is still required.

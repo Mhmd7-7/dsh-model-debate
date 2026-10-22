@@ -15,7 +15,7 @@ Live Inspect was used before implementation for Host `llm`, `storageDomain`, `co
 ## Checks run
 
 * `npm run typecheck`: passed (strict TypeScript, Host, core, Client and tests).
-* v1.1 `npm test` with `DSH_RUNTIME_ROOT` pointing at this installed DSH: **97 passed, 0 failed, 0 skipped**. This includes deterministic virtual-time providers, image admission/security/capability tests, static Client contracts, and actual DSH runtime contract tests.
+* v1.2 `npm test` with `DSH_RUNTIME_ROOT` pointing at this installed DSH: **127 passed, 0 failed, 0 skipped**. This includes deterministic virtual-time providers, image admission/security/capability tests, static Client contracts, and actual DSH runtime contract tests.
 * `npm run build`: passed, producing Host ESM and native lazy ModuleLoader Client bundles.
 * `node --check dist/index.js` and `node --check dist/client.js`: passed.
 * `npm run smoke`: passed, **explicitly mock** end-to-end smoke, not provider inference.
@@ -94,6 +94,24 @@ Independent numeric decoding using the installed Sharp library confirmed source 
 * Attempting an image debate with the current `ollama/gemma3:latest` route was rejected before inference because its actual catalog/resolved configuration advertised image input as unsupported. The plugin did not override that configuration or silently drop images.
 
 The live `image` action returned the exact admitted PNG bytes, and export retained image metadata without embedding pixel data. Provider-specific vision accuracy/connectivity varies. No GitHub repository or upload was created during image implementation; public publishing was requested separately afterward.
+
+## Follow-up conversation (v1.2) — actual verification
+
+**127 tests passed, 0 failed, 0 skipped** with the actual installed runtime enabled; strict TypeScript, build, JavaScript syntax, and deterministic mock smoke passed. The 27 focused follow-up tests cover same-session continuation, preserved original messages/reviews, fresh per-cycle limits, cumulative usage, model/image revalidation, Stop and late output, no false completion inherited from old participation, initial-write atomicity, legacy schema defaults, and re-run semantics. The real DSH JSON storage test closes/reopens the domain repeatedly and verifies both completed follow-ups and interrupted user turns, exact request context, and Markdown/JSON exports remain intact. Its provider is deterministic, not a live model.
+
+Installed **1.2.0** through Plugin Manager with `application: applied`; the connected Client confirmed the existing Chat/Debate registration remained active. No replacement server or core changes.
+
+### Live Arabic conversation after completion
+
+Saved debate **`f30f48eb-763c-462b-9e3f-45b2a06b4ba2`**, with `deepseek-official/deepseek-flash` and `codex/gpt-6-luna`, plus DeepSeek as reviewer:
+
+1. Original Arabic question: ten books at 20 riyals each, no discount. Two rounds/four participant messages and review completed with the correct **200 riyal** answer.
+2. After it completed, the actual `followup` action supplied **15% discount, then 10 riyals delivery**. It returned the **same session ID** and a new user-turn ID.
+3. Both participants used the new information, explicitly revised their original claims, and returned **180 riyals**, **20 less** than before: `200 × 0.85 + 10 = 180`.
+4. The second cycle completed two more rounds/four replies plus review. The original four messages and original 200-riyal review remained unchanged; the new user turn, replies and updated review were retained in the same saved conversation and Markdown export.
+5. No request failures were reported across all ten actual calls. The new cycle took approximately **26.4 seconds** from user-turn commit to review completion. Provider-reported cumulative usage was **23,935 input**, **7,236 output**, **32,451 total** tokens; provider totals need not equal the sum of the reported components and are not independent billing measurements.
+
+The caller's next-run participant/settings selections were restored after the smoke. The demonstration is retained for manual inspection; no autonomous follow-up is scheduled. Browser typing/click geometry remains unverified because no browser-control tool was supplied. Follow-ups accept text; original saved images continue to be sent, but new image attachments in follow-ups are not implemented.
 
 ## Visual verification limits
 

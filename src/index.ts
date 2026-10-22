@@ -1,7 +1,7 @@
 import Schema from '@deepseek-ai/schemastery';
 import { z } from 'zod';
 import { DshAdapter, ModelFailure, type AdapterContext } from './adapter.js';
-import { DebateService } from './engine.js';
+import { DebateService, FollowUpError } from './engine.js';
 import { Repository, type RepositoryDomain } from './persistence.js';
 import { DshImages, ImageInputError, type AttachmentContext } from './images.js';
 import { encodedImageSchema, preferencesSchema, sessionSchema, settingsSchema } from './state.js';
@@ -18,9 +18,9 @@ export const Config = Schema.object({
 });
 export interface HostConfig { localOnly: boolean; providerLimits: Record<string, number>; providerSpacingMs: Record<string, number>; maxConcurrentRuns: 1; metadataTimeoutMs: number; }
 
-const actions = ['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image'] as const;
+const actions = ['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image', 'followup'] as const;
 const requestSchema = z.object({
-  action: z.enum(actions), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().min(1).max(30000).optional(), settings: settingsSchema.optional(),
+  action: z.enum(actions), message: z.string().trim().min(1).max(30000).optional(), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().min(1).max(30000).optional(), settings: settingsSchema.optional(),
   name: z.string().trim().min(1).max(100).optional(), title: z.string().trim().min(1).max(160).optional(), format: z.enum(['json', 'markdown']).optional(),
 }).strict();
 const maxBodyBytes = 30 * 1024 * 1024; // 20 MiB image bytes after base64 expansion, plus bounded settings/question.
@@ -29,8 +29,8 @@ export type OperationResult = { ok: true; value: unknown } | { ok: false; error:
 const expectedErrors = new Set(['This discussion is not executing.', 'Stop this run before renaming it.', 'Stop this run before deleting it.', 'Preset limit reached (100).', 'Preset not found.', 'Unsupported action', 'Debate session not found.', 'Another debate is active. Stop it or wait before starting another.', 'No available discussion to review.', 'Configure and enable at least two distinct models in DSH Settings → Models.']);
 function publicError(error: unknown): string {
   if (error instanceof z.ZodError) return `Invalid request or settings (${[...new Set(error.issues.map(issue => issue.path.join('.') || 'request'))].slice(0, 8).join(', ')}).`;
-  if (error instanceof ModelFailure || error instanceof ImageInputError) return error.message;
-  if (error instanceof Error && (expectedErrors.has(error.message) || /^Missing (id|format|question|settings|name|title|imageIndex)$/.test(error.message) || /^(Model unavailable or restricted: |Unsupported reasoning effort for |Reviewer unavailable: )/.test(error.message))) return error.message.slice(0, 600);
+  if (error instanceof ModelFailure || error instanceof ImageInputError || error instanceof FollowUpError) return error.message;
+  if (error instanceof Error && (expectedErrors.has(error.message) || /^Missing (id|format|question|settings|name|title|imageIndex|message)$/.test(error.message) || /^(Model unavailable or restricted: |Unsupported reasoning effort for |Reviewer unavailable: )/.test(error.message))) return error.message.slice(0, 600);
   // Storage, middleware and provider internals can contain paths, request bodies or credentials.
   return 'Model Debate could not complete the operation. Check plugin storage and model configuration; private error details are not exposed.';
 }
@@ -43,10 +43,11 @@ export function createOperation(service: Pick<DebateService, 'operation'>): (inp
 
 export const toolParameters = {
   type: 'object', properties: {
-    action: { type: 'string', enum: [...actions], description: 'snapshot discovers models/settings/history; get reads a full debate; settings replaces future-run settings; start starts a debate; stop cancels without review; review explicitly reviews available messages; rerun starts a new debate; rename/delete/select manage history; preset-* manage saved settings; export returns transcript text; image reads a saved debate image.' },
-    id: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Debate ID for get/stop/review/rename/delete/select/rerun/export/image, or preset ID for preset-*. Null select clears selection.' },
+    action: { type: 'string', enum: [...actions], description: 'snapshot discovers models/settings/history; get reads a full debate; settings replaces future-run settings; start starts a debate; followup continues an inactive debate with new user information; stop cancels without review; review explicitly reviews available messages; rerun starts a new debate; rename/delete/select manage history; preset-* manage saved settings; export returns transcript text; image reads a saved debate image.' },
+    id: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Debate ID for get/followup/stop/review/rename/delete/select/rerun/export/image, or preset ID for preset-*. Null select clears selection.' },
     images: { type: 'array', maxItems: 4, items: { type: 'object', properties: { mediaType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] }, data: { type: 'string', description: 'Canonical base64 image bytes, without a data URL prefix.' }, name: { type: 'string' } }, required: ['mediaType', 'data'], additionalProperties: false }, description: 'Optional images for start only: at most 4, 10 MiB each and 20 MiB total, further limited by DSH. All enabled participants and reviewer must have confirmed image support. Never send arbitrary attachment references.' },
     imageIndex: { type: 'integer', minimum: 0, maximum: 19, description: 'Required for image: zero-based image index in the saved debate identified by id.' },
+    message: { type: 'string', minLength: 1, maxLength: 30000, description: 'Required for followup: new information, a correction or question for an inactive saved debate. Uses its original participants/settings/images with fresh bounded time/reply/token allowances; preserves previous messages and reviews. Do not supply settings or images.' },
     question: { type: 'string', description: 'Required for start; the question to debate, at most 30,000 characters.' },
     settings: { type: 'object', additionalProperties: true, description: 'Complete settings object from snapshot, modified as needed. Required for settings/preset-save; optional for start. Contains participants, scheduling bounds and reviewer. Host local-only and concurrency restrictions cannot be loosened here.' },
     name: { type: 'string', description: 'Required preset name for preset-save, at most 100 characters.' },
@@ -59,7 +60,7 @@ function toolText(args: unknown, result: OperationResult): string {
   let rendered: unknown = result;
   if (result.ok && (args as { action?: string })?.action === 'snapshot' && result.value && typeof result.value === 'object') {
     const snapshot = result.value as Record<string, any>;
-    rendered = { ok: true, value: { ...snapshot, sessions: Array.isArray(snapshot.sessions) ? snapshot.sessions.map((session: any) => ({ id: session.id, title: session.title, status: session.status, updatedAt: session.updatedAt, messageCount: session.messages?.length ?? 0, hasFinal: !!session.final })) : [], detail: 'Use get with a debate ID for its full settings, transcript, task state and request log.' } };
+    rendered = { ok: true, value: { ...snapshot, sessions: Array.isArray(snapshot.sessions) ? snapshot.sessions.map((session: any) => ({ id: session.id, title: session.title, status: session.status, updatedAt: session.updatedAt, messageCount: session.messages?.length ?? 0, followUpCount: session.followUps?.length ?? 0, hasFinal: !!session.final })) : [], detail: 'Use get with a debate ID for its full settings, transcript, task state and request log.' } };
   }
   const text = JSON.stringify(rendered, null, 2);
   return text.length <= 60000 ? text : `${text.slice(0, 60000)}\n[Tool display truncated at 60,000 characters. Use get with a specific debate ID, or export for its complete transcript.]`;
@@ -98,7 +99,7 @@ export async function apply(ctx: HostContext, rawConfig: HostConfig): Promise<vo
     } });
     yield ctx.tools.register({
       name: 'model_debate',
-      description: 'Read and manage saved multi-model debates. Start or rerun spends model-provider resources; stop cancels without a final review, while review explicitly requests one. Delete removes saved history. Debate participants inspect text and optional submitted images, but never execute suggested tools or external actions. Start with snapshot to discover exact available models and complete settings.',
+      description: 'Read and manage saved multi-model debates. Start, followup or rerun spends model-provider resources; stop cancels without a final review, while review explicitly requests one. Delete removes saved history. Debate participants inspect text and optional submitted images, but never execute suggested tools or external actions. Start with snapshot to discover exact available models and complete settings.',
       parameters: toolParameters,
       output: { schema: { type: 'object', properties: { ok: { type: 'boolean' }, value: { oneOf: [{ type: 'object', additionalProperties: true }, { type: 'array', items: {} }, { type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, error: { type: 'string' } }, required: ['ok'], additionalProperties: false }, render: (args: unknown, value: OperationResult) => [{ type: 'text', text: toolText(args, value) }] },
       execute: (args: unknown) => operation(args),

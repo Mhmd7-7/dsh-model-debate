@@ -50,14 +50,18 @@ export type Usage = z.infer<typeof usageSchema>;
 export const taskSchema = z.object({ id: z.string(), participantId: z.string(), round: z.number(), status: taskStatusSchema, attempt: z.number(), queuedAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), error: z.string().optional(), partial: z.string().max(100000).optional() });
 export type Task = z.infer<typeof taskSchema>;
 export const issueSchema = z.object({ id: z.string(), claimId: z.string(), ownerId: z.string(), raisedBy: z.string(), text: z.string(), evidence: z.string(), verification: z.string(), resolved: z.boolean(), resolution: z.string().optional() });
+export const reviewSchema = z.object({ text: z.string().max(100000), provider: z.string(), model: z.string(), timestamp: z.number(), incomplete: z.boolean() });
+export const followUpSchema = z.object({ id: z.string(), text: z.string().trim().min(1).max(30000), timestamp: z.number(), startRound: z.number().int().min(1), budgetStart: z.number().nonnegative() });
+export type FollowUp = z.infer<typeof followUpSchema>;
 export const sessionSchema = z.object({
   schemaVersion: z.literal(1), id: z.string(), title: z.string().max(160), question: z.string().max(30000), images: z.array(imageRefSchema).max(20).default([]), createdAt: z.number(), updatedAt: z.number(),
   status: z.enum(['running', 'reviewing', 'completed', 'partial', 'stopped', 'interrupted']), settings: settingsSchema,
   messages: z.array(messageSchema), tasks: z.array(taskSchema), issues: z.array(issueSchema),
+  followUps: z.array(followUpSchema).max(30).default([]), reviews: z.array(reviewSchema.extend({ afterRound: z.number().int().nonnegative() })).default([]),
   requests: z.array(z.object({ taskId: z.string(), attempt: z.number(), timestamp: z.number(), system: z.string(), prompt: z.string(), config: z.object({ provider: z.string(), model: z.string(), maxTokens: z.number().optional(), reasoningEffort: z.string().optional() }), contextIds: z.array(z.string()), images: z.array(imageRefSchema).max(20).default([]), compressed: z.boolean() })),
   usage: usageSchema, usageUnavailable: z.boolean(), budgetUsed: z.number(), budgetEstimated: z.boolean(),
   round: z.number(), stage: z.string(), stageDeadline: z.number(), deadline: z.number(), startedAt: z.number(), endedAt: z.number().optional(),
-  final: z.object({ text: z.string(), provider: z.string(), model: z.string(), timestamp: z.number(), incomplete: z.boolean() }).nullable(),
+  final: reviewSchema.nullable(),
   reviewError: z.string().nullable(), stopReason: z.string().nullable(), compression: z.array(z.object({ timestamp: z.number(), before: z.number(), after: z.number(), messageIds: z.array(z.string()) })),
 });
 export type DebateSession = z.infer<typeof sessionSchema>;

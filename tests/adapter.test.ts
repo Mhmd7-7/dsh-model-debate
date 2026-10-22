@@ -121,7 +121,7 @@ test('tool and UI operation envelope share strict validation and sanitize intern
 });
 
 function session(id = 's1'): DebateSession {
-  return { schemaVersion: 1, id, title: 'Original', question: 'Question', images: [], createdAt: 1, updatedAt: 1, status: 'running', settings: defaults(), messages: [], tasks: [{ id: 't1', participantId: 'p1', round: 1, status: 'responding', attempt: 1, queuedAt: 1 }], issues: [], requests: [], usage: { inputTokens: 0, outputTokens: 0 }, usageUnavailable: false, budgetUsed: 0, budgetEstimated: false, round: 1, stage: 'test', stageDeadline: 5, deadline: 20, startedAt: 1, final: null, reviewError: null, stopReason: null, compression: [] };
+  return { schemaVersion: 1, id, title: 'Original', question: 'Question', images: [], createdAt: 1, updatedAt: 1, status: 'running', settings: defaults(), messages: [], followUps: [], reviews: [], tasks: [{ id: 't1', participantId: 'p1', round: 1, status: 'responding', attempt: 1, queuedAt: 1 }], issues: [], requests: [], usage: { inputTokens: 0, outputTokens: 0 }, usageUnavailable: false, budgetUsed: 0, budgetEstimated: false, round: 1, stage: 'test', stageDeadline: 5, deadline: 20, startedAt: 1, final: null, reviewError: null, stopReason: null, compression: [] };
 }
 class Table<T> implements DomainTable<T> {
   data = new Map<string, T>(); log: string[] = []; beforePut?: (key: string, value: T) => Promise<void>;
