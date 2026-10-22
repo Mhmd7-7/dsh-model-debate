@@ -1,0 +1,4 @@
+- insert:
+    - id: model-debate
+      name: '@local/dsh-model-debate'
+      config: {}

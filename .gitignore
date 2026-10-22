@@ -1,0 +1,11 @@
+node_modules/
+*.tgz
+.test-artifacts/
+.test-artifacts-*.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+coverage/
