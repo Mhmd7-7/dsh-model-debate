@@ -4,21 +4,52 @@ A complete, self-contained DSH bundle for observing an evidence-first exchange b
 
 **Compatibility checked:** DSH **0.2.1-rc.2**, Cordis **4.0.5**, DSH LLM/storage/Client packages **0.2.1-rc.2**, Node **26.3.0** (runtime requirement Node 22+). Versions are deliberately pinned: this plugin does not grant a compatibility exemption on another DSH version.
 
-## Open the installed plugin
+## Installation
 
-After installing the bundle in your DSH profile, open your existing DSH Web GUI (for example **http://127.0.0.1:3080**), refresh if necessary, and choose **Debate** in the **Chat | Debate** switch near Chat's top header. A **Model Debate** entry is also available in DSH's global panel list. The Debate panel includes its own switch back to Chat.
+**Requires:** DeepSeek Harness **0.2.1-rc.2**, Node.js **22 or newer**, and at least **two configured model routes** for running a debate. Install this as a **DSH plugin**, not a standalone application.
 
-The switch uses `layout.selectPanel()`; it does **not** create/change the active Chat session or rewrite Chat history. Debate history is separate plugin-owned durable storage. DSH's ordinary outer workspace sidebar remains intact: the plugin adds a narrow debate-history column inside its supported main-panel surface instead of replacing DSH's sidebar.
+### Option 1 — Install in the DSH GUI (recommended)
 
-## Install from GitHub
+1. Open your existing **DeepSeek Harness Web GUI**.
+2. Open **Plugins** → **Add / Install**.
+3. Paste this GitHub package source into the install field:
 
-In DSH Plugins → Add / Install, enter **`github:Mhmd7-7/dsh-model-debate`**. The repository includes built Host and Client bundles, so installation does not need to run build scripts. The agent equivalent is:
+   ```text
+   github:Mhmd7-7/dsh-model-debate
+   ```
+
+4. Select **Install** and enable **Model Debate** if prompted. The repository already includes the built plugin, so **you do not need to clone it, build it, or run npm commands** for this method.
+5. When installation reports **`application: applied`**, refresh the page. If it reports **`restart-required`**, restart that DSH profile first, then refresh.
+6. Open **Debate** using the **Chat | Debate** switch, or choose **Model Debate** from the global panel list. Choose **New debate**, select your models in **Settings**, and send your question.
+
+> Installation affects every session in the selected DSH profile. Compatibility is deliberately pinned to DSH **0.2.1-rc.2**; do not bypass a version mismatch warning.
+
+### Option 2 — Ask your DSH assistant to install it
+
+Copy this message into a DSH chat where Plugin Manager is available:
+
+```text
+Install and enable the Model Debate plugin in my current DSH profile from github:Mhmd7-7/dsh-model-debate using the plugin_manager tool. Report whether activation was applied or a restart is required.
+```
+
+The equivalent **`plugin_manager` tool call** is below. This JSON is **not a terminal command**:
 
 ```json
 {"action":"install_bundle","target":"github:Mhmd7-7/dsh-model-debate"}
 ```
 
-Compatibility remains pinned to DSH **0.2.1-rc.2**. Refresh your existing GUI after activation reports `application: applied`.
+### التثبيت بالعربية
+
+1. افتح واجهة **DeepSeek Harness** ثم **Plugins → Add / Install**.
+2. انسخ `github:Mhmd7-7/dsh-model-debate` إلى حقل التثبيت واضغط **Install**، ثم فعّل **Model Debate** إذا طُلب ذلك.
+3. حدّث الصفحة بعد نجاح التفعيل. إذا ظهر `restart-required`، أعد تشغيل ملف DSH الشخصي أولًا.
+4. افتح **Debate / المناظرة**، واختر نموذجين أو أكثر من الإعدادات، ثم أرسل سؤالك. لا تحتاج إلى تنزيل المشروع أو بنائه يدويًا بهذه الطريقة.
+
+### Open the installed plugin
+
+Use your existing DSH Web GUI (for example **http://127.0.0.1:3080**), not a separate development server. The Debate panel includes its own switch back to Chat.
+
+The switch uses `layout.selectPanel()`; it does **not** create/change the active Chat session or rewrite Chat history. Debate history is separate plugin-owned durable storage. DSH's ordinary outer workspace sidebar remains intact: the plugin adds a narrow debate-history column inside its supported main-panel surface instead of replacing DSH's sidebar.
 
 ## Build and install from a local checkout
 
