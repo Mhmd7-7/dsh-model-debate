@@ -309,7 +309,7 @@ export class DshAdapter implements ModelAdapter {
       if (!text.trim()) {
         if (diagnostics.chunks.malformed) throw new ModelFailure('Provider returned malformed response chunks with no public answer.', 'MALFORMED_RESPONSE');
         if (diagnostics.toolsObserved) throw new ModelFailure('Provider requested tools, but Model Debate does not support tools; no tool was executed and no public answer was returned.', 'UNSUPPORTED_TOOLS');
-        if (diagnostics.reasoningObserved) throw new ModelFailure('Provider returned reasoning without a public answer. Reasoning is not used as answer text; check output limits and model configuration.', 'EMPTY_RESPONSE');
+        if (diagnostics.reasoningObserved) throw new ModelFailure(diagnostics.finishReason === 'max-tokens' ? 'The provider used the entire output-token allowance on private reasoning before producing a public answer (finish: max-tokens). Increase maximum output tokens or lower reasoning effort.' : 'Provider returned reasoning without a public answer. Reasoning is not used as answer text; check output limits and model configuration.', 'EMPTY_RESPONSE');
         throw new ModelFailure('Provider returned no public response text.', 'EMPTY_RESPONSE');
       }
       diagnostics.phase = 'settled';

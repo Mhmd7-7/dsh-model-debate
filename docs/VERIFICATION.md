@@ -1,6 +1,6 @@
 # Verification report
 
-Current package version: **1.3.0**. Earlier sections documenting v1.1/v1.2 remain historical evidence for those versions; the 23 October section below records the current implementation.
+Current package version: **1.3.1**. Earlier sections documenting v1.1/v1.2 remain historical evidence for those versions; the 23 October section below records the current implementation.
 
 Tested on **22 October 2026** against the existing DSH GUI at **http://127.0.0.1:3080**.
 
@@ -117,7 +117,7 @@ The caller's next-run participant/settings selections were restored after the sm
 
 ## Rendering, diagnostics, retries and continuation images (23 October 2026)
 
-**170 tests total. Without `DSH_RUNTIME_ROOT`, 162 pass and 8 optional runtime tests skip; with the installed DSH runtime enabled, all 170 pass with 0 failures and 0 skips, including actual DSH storage, attachment and LLM contracts plus official DeepSeek/pi-ai parser fixtures.** Strict typecheck, build, `node --check dist/index.js`, `node --check dist/client.js`, deterministic smoke and `npm pack --dry-run --json` passed. No DSH core file or user configuration was modified.
+**171 tests total. Without `DSH_RUNTIME_ROOT`, 163 pass and 8 optional runtime tests skip; with the installed DSH runtime enabled, all 171 pass with 0 failures and 0 skips, including actual DSH storage, attachment and LLM contracts plus official DeepSeek/pi-ai parser fixtures.** Strict typecheck, build, `node --check dist/index.js`, `node --check dist/client.js`, deterministic smoke and `npm pack --dry-run --json` passed. No DSH core file or user configuration was modified.
 
 ### Confirmed causes
 
@@ -150,7 +150,22 @@ A second live isolated run used the actual original-image path with a synthetic 
 * `deepseek-official/deepseek-flash`, reasoning `high`, image attached, **public answer completed** and correctly described **red, green, blue** left-to-right from the 96×64 image.
 * `codex/gpt-6.1-sol` control and reviewer were **rate limited** by their provider, so the discussion remained `partial`, no review was produced, and the UI correctly displayed the provider failure rather than a verdict.
 
-Together these live runs confirm that the current DeepSeek route can serve both a normal public answer and a real image+reasoning request, so a blanket "DeepSeek is down" or "the model name is invalid" explanation is false. The temporary runs changed the then-current next-run settings and active selection; both were restored to the exact pre-verification settings and original active debate afterward. The two temporary sessions are retained, clearly titled as verification runs, for inspection; no user-owned debate was modified. They do **not** reproduce the historical empty response, and they did not exercise the locally rebuilt diagnostics because the installed plugin is still the GitHub copy. The historical exact cause therefore remains unconfirmed; installing this build and repeating the original image request will expose the new attempt category. The live image run used the original-image path, **not** the new continuation-attachment code.
+Together these live runs confirm that the current DeepSeek route can serve both a normal public answer and a real image+reasoning request, so a blanket "DeepSeek is down" or "the model name is invalid" explanation is false. The temporary runs changed the then-current next-run settings and active selection; both were restored to the exact pre-verification settings and original active debate afterward. The two temporary sessions are retained, clearly titled as verification runs, for inspection; no user-owned debate was modified. The historical `beac5be2-…` session still lacks diagnostics, so its exact old cause is not recoverable. The live image run used the original-image path, **not** the new continuation-attachment code.
+
+### DeepSeek reasoning-budget failure (24 October 2026) — confirmed and fixed
+
+A later live session **`fca88307-33cd-46a5-9b28-ee04e898e47a`** reproduced the failure with the diagnostic build. DeepSeek task `a90a6a7f-…` recorded:
+
+* `reasoningDelta: 3000`, `textDelta: 0`, `publicTextLength: 0`
+* `finishReason: "max-tokens"`
+* prepared `maxTokens: 3000`, reasoning effort `high`
+* category `reasoning-only`, **no tools**, no malformed chunks
+
+Round 3 produced 2,832 reasoning deltas plus 167 public-text deltas, then ended with `max-tokens` at 421 public characters and was correctly published as incomplete. The reviewer had the same reasoning-only outcome. The two Codex participants independently returned HTTP 429 rate limits in every round, unrelated to DeepSeek.
+
+**Confirmed cause:** DeepSeek counts private reasoning against the output token limit. The automatic cap was only `responseChars / 2` (3,000), with no allowance for reasoning, so DeepSeek could consume all 3,000 tokens reasoning and never emit a public answer. This is a plugin budget-allocation defect, not provider downtime, an invalid model, or a rendering failure.
+
+**Fix:** automatic output allowance is now a public-answer estimate (`ceil(responseChars / 1.5)`, better for Arabic/mixed text) plus reasoning headroom based on the selected effort (`off` 0, low 2,048, medium 4,096, high 8,192, max 16,384), with 8,192 reserved for reasoning-capable models whose provider applies a default effort. Explicit participant maximums are still honored exactly. Reasoning-only `max-tokens` failures now say that the output-token allowance was exhausted on reasoning and tell the user to increase the maximum or lower reasoning effort. A regression asserts at least 12,000 automatic tokens for a reasoning-capable participant at `responseChars: 6000`, and the official DeepSeek parser fixture asserts the actionable `max_tokens` failure message.
 
 ### Continuation image evidence
 

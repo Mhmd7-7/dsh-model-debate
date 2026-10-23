@@ -409,7 +409,7 @@ var DshAdapter = class {
       if (!text2.trim()) {
         if (diagnostics.chunks.malformed) throw new ModelFailure("Provider returned malformed response chunks with no public answer.", "MALFORMED_RESPONSE");
         if (diagnostics.toolsObserved) throw new ModelFailure("Provider requested tools, but Model Debate does not support tools; no tool was executed and no public answer was returned.", "UNSUPPORTED_TOOLS");
-        if (diagnostics.reasoningObserved) throw new ModelFailure("Provider returned reasoning without a public answer. Reasoning is not used as answer text; check output limits and model configuration.", "EMPTY_RESPONSE");
+        if (diagnostics.reasoningObserved) throw new ModelFailure(diagnostics.finishReason === "max-tokens" ? "The provider used the entire output-token allowance on private reasoning before producing a public answer (finish: max-tokens). Increase maximum output tokens or lower reasoning effort." : "Provider returned reasoning without a public answer. Reasoning is not used as answer text; check output limits and model configuration.", "EMPTY_RESPONSE");
         throw new ModelFailure("Provider returned no public response text.", "EMPTY_RESPONSE");
       }
       diagnostics.phase = "settled";
@@ -1042,6 +1042,22 @@ function validateImageModels(settings, models, count2) {
 }
 
 // src/engine.ts
+var REASONING_OUTPUT_RESERVE = { off: 0, none: 0, disabled: 0, light: 2048, low: 2048, balanced: 4096, medium: 4096, high: 8192, xhigh: 12288, max: 16384 };
+function automaticOutputTokens(settings, participant, model) {
+  const publicAnswer = Math.ceil(settings.responseChars / 1.5);
+  const explicit = participant.options.reasoningEffort?.toLowerCase();
+  const reserve = explicit !== void 0 ? REASONING_OUTPUT_RESERVE[explicit] ?? 4096 : model?.reasoningEfforts.length ? 8192 : 0;
+  return Math.min(32768, Math.max(64, publicAnswer + reserve));
+}
+function incompleteReason(settings, text2, review, hasSections, diagnostics) {
+  if (review && !hasSections) return "Reviewer output is incomplete or missing one of the five required numbered sections; no final review completed.";
+  if (text2.length > settings.responseChars) return `Response exceeded the configured ${settings.responseChars}-character limit; output is incomplete.`;
+  if (diagnostics?.finishReason === "max-tokens") return "Response reached the provider output-token limit before completion. Increase maximum output tokens or lower reasoning effort.";
+  if (diagnostics?.finishReason === "tool-calls") return "Provider requested tools, which this debate does not support; output is incomplete.";
+  if (diagnostics?.category === "malformed") return "Provider emitted malformed response chunks; output is incomplete.";
+  if (!diagnostics?.finishReason) return "Provider stream ended without a successful finish; output is incomplete.";
+  return "Response incomplete: provider output/token limit, missing successful finish, required review sections, or configured response-length limit exceeded.";
+}
 var actionSchema = z4.object({ action: z4.enum(["snapshot", "get", "settings", "start", "stop", "review", "rename", "delete", "select", "rerun", "preset-save", "preset-delete", "preset-apply", "export", "image", "followup"]), message: z4.string().max(3e4).optional(), images: z4.array(encodedImageSchema).max(4).optional(), imageIndex: z4.number().int().min(0).max(19).optional(), followUpId: z4.string().max(100).optional(), id: z4.string().max(100).nullable().optional(), question: z4.string().trim().min(1).max(3e4).optional(), settings: settingsSchema.optional(), name: z4.string().trim().min(1).max(100).optional(), title: z4.string().trim().min(1).max(160).optional(), format: z4.enum(["json", "markdown"]).optional() }).strict();
 var ACTIVE = ["queued", "waiting for cooldown", "responding"];
 var TRANSIENT = ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"];
@@ -1440,6 +1456,7 @@ var DebateService = class {
     }
     if (content.context.compressed) s.compression.push({ timestamp: this.clock.now(), before: content.context.before, after: content.context.after, messageIds: content.context.ids });
     const policy = this.adapter.retryPolicy(p.provider), attempts = Math.min(settings.retries, policy.maxRetries ?? settings.retries) + 1;
+    const automaticMaxTokens = automaticOutputTokens(settings, p, this.models.find((model) => model.provider === p.provider && model.model === p.model));
     let readyAt = 0;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       let release, reservation = 0, accepted = false;
@@ -1474,7 +1491,7 @@ var DebateService = class {
         if (run.abort.signal.aborted || this.clock.now() >= s.stageDeadline) throw new Cancelled(run.abort.signal.aborted ? "STOPPED" : "DEADLINE");
         const inputEstimate = Buffer.byteLength(content.system + content.prompt, "utf8");
         const available = settings.tokenBudget === null ? Infinity : settings.tokenBudget - this.cycleBudgetUsed(s) - run.reservedTokens - (review ? 0 : Math.min(4096, Math.ceil(settings.tokenBudget * 0.15)));
-        const maxTokens = Math.floor(Math.min(p.options.maxTokens ?? Math.ceil(settings.responseChars / 2), available - inputEstimate));
+        const maxTokens = Math.floor(Math.min(p.options.maxTokens ?? automaticMaxTokens, available - inputEstimate));
         if (maxTokens < 64) {
           task.status = "cancelled";
           task.error = "Token budget cannot admit this request (conservative input/output reservation, including final-review token reserve).";
@@ -1528,17 +1545,19 @@ var DebateService = class {
         this.account(run, result.usage, reservation, accepted);
         reservation = 0;
         if (result.diagnostics) attemptState.diagnostics = result.diagnostics;
-        const trimmed = result.text, incomplete = result.incomplete || result.text.length > settings.responseChars || review && !hasReviewSections(result.text);
+        const trimmed = result.text, sections = review ? hasReviewSections(result.text) : true;
+        const incomplete = result.incomplete || result.text.length > settings.responseChars || !sections;
+        const reason = incomplete ? incompleteReason(settings, trimmed, review, sections, result.diagnostics) : void 0;
         task.status = incomplete ? "partial" : "completed";
         delete task.error;
-        if (incomplete) task.error = "Response incomplete: provider output/token limit, missing successful finish, required review sections, or configured response-length limit exceeded.";
+        if (reason) task.error = reason;
         task.endedAt = this.clock.now();
         delete task.partial;
         finishAttempt();
         if (review) {
           if (!trimmed) throw new Error("Empty final review");
           s.final = { text: trimmed, provider: p.provider, model: p.model, timestamp: this.clock.now(), incomplete };
-          s.reviewError = incomplete ? "Reviewer output was truncated, incomplete, or missing one of the five required numbered sections; no final review completed." : null;
+          s.reviewError = reason ?? null;
         } else if (trimmed) {
           const message = publish(trimmed, p, snapshot, { id: `m${s.messages.length + 1}`, round: s.round, turn: s.messages.length + 1, stage: s.stage, timestamp: this.clock.now(), incomplete, targets });
           s.messages.push(message);

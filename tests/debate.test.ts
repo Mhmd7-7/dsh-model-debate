@@ -79,6 +79,12 @@ test('review failure preserves discussion, no fabricated verdict, explicit revie
   f.adapter.behavior = () => ({}); await f.service.operation({ action: 'review', id: f.id }); await finish(f.service, f.clock); s = f.repo.get(f.id)!; assert.ok(s.final); assert.equal(s.status, 'completed');
 });
 test('single-round separate answers cannot be labeled a complete multi-model exchange', async () => { const f = await fixture({ rounds: 1 }); await finish(f.service, f.clock); assert.equal(f.repo.get(f.id)!.status, 'partial'); });
+test('reasoning-capable models receive automatic headroom beyond the public response budget', async () => {
+  const f = await fixture({ rounds: 1 }); await finish(f.service, f.clock);
+  const requests = f.repo.get(f.id)!.requests;
+  assert.ok(requests.length >= 2);
+  for (const request of requests) assert.ok((request.config.maxTokens ?? 0) >= 12000, `reasoning-capable request must reserve public-answer headroom (${request.config.maxTokens})`);
+});
 test('budgets are conservatively admitted, usage unavailability labeled, no exact cost claim', async () => {
   const f = await fixture({ tokenBudget: 12000, rounds: 3 }, () => ({ noUsage: true })); await finish(f.service, f.clock); const s = f.repo.get(f.id)!; assert.ok(s.budgetEstimated); assert.ok(s.usageUnavailable); assert.ok(s.tasks.some(t => t.status === 'cancelled')); assert.ok(s.budgetUsed <= 12000);
 });

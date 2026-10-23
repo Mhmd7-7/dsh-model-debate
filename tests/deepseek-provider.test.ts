@@ -36,7 +36,7 @@ test('installed official DeepSeek Messages transport handles split SSE, empty/re
   const failure = async (code: string, category: string) => { let caught: ModelFailure | undefined; await assert.rejects(run(), (error: unknown) => { assert.ok(error instanceof ModelFailure); caught = error; assert.equal(error.code, code); assert.equal(error.diagnostics?.category, category); assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|invalid\.test/); return true; }); return caught!; };
   try {
     body = sse(start, ...block('text', 'Answer'), ...end()); const result = await run(); assert.equal(result.text, 'Answer'); assert.equal(result.incomplete, false); assert.deepEqual(result.usage, { inputTokens: 3, outputTokens: 2, totalTokens: 5 });
-    body = sse(start, ...block('thinking', 'PRIVATE_REASONING'), ...end()); await failure('EMPTY_RESPONSE', 'reasoning-only');
+    body = sse(start, ...block('thinking', 'PRIVATE_REASONING'), ...end('max_tokens')); const reasoningOnly = await failure('EMPTY_RESPONSE', 'reasoning-only'); assert.match(reasoningOnly.message, /output-token allowance|max-tokens/);
     body = sse(start, { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'PRIVATE_TOOL_ID', name: 'PRIVATE_NAME', input: {} } }, { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } }, { type: 'content_block_stop', index: 0 }, ...end('tool_use')); await failure('UNSUPPORTED_TOOLS', 'tool-only');
     body = sse(start, ...end()); await failure('EMPTY_RESPONSE', 'empty');
     body = sse(start, ...block('text', 'Partial')); const interrupted = await failure('STREAM_CLOSED', 'interrupted'); assert.equal(interrupted.partial, 'Partial');
