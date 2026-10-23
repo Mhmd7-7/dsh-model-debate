@@ -1,5 +1,7 @@
 # Verification report
 
+Current package version: **1.3.0**. Earlier sections documenting v1.1/v1.2 remain historical evidence for those versions; the 23 October section below records the current implementation.
+
 Tested on **22 October 2026** against the existing DSH GUI at **http://127.0.0.1:3080**.
 
 ## Runtime and APIs actually checked

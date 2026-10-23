@@ -69,7 +69,7 @@ The directory is linked by local installation: keep it available. To update buil
 
 To uninstall, use DSH Plugins → Model Debate → Remove, or `plugin_manager` action `remove_bundle` with target `@local/dsh-model-debate`. Plugin-owned saved discussions are not silently erased on uninstall.
 
-## Keep talking after the result (version 1.2)
+## Keep talking after the result (version 1.3)
 
 A result no longer closes the conversation. At the end of a saved debate, use **Continue the conversation** to send a new question, correction, or additional information. Every participant responds to your latest message with the original question, previous discussion, all prior user additions, and earlier reviews in context. The reviewer then updates the synthesis. Your message and the new replies remain in the **same debate**; earlier answers and reviews are retained, not overwritten.
 
