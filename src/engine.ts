@@ -6,13 +6,14 @@ import { defaults, encodedImageSchema, settingsSchema, starterPresets, validateR
 import { exportSession, hasReviewSections, makePrompt, publish, updateIssues } from './content.js';
 import { Cancelled, RequestGate, realClock, sleep, type Clock } from './scheduler.js';
 import { noImages, validateImageModels, ImageInputError, type ImageGateway } from './images.js';
+import { conversationImages, conversationImageGroups } from './conversation-images.js';
 
 export interface RepositoryLike { list(): DebateSession[]; get(id: string): DebateSession | undefined; save(s: DebateSession): Promise<void>; remove(id: string): Promise<void>; getPreferences(): Preferences | undefined; savePreferences(p: Preferences): Promise<void>; recover(): Promise<void>; }
 interface Running { session: DebateSession; abort: AbortController; gate: RequestGate; done: Promise<void>; reservedTokens: number; saveChain: Promise<void>; }
 interface Options { providerLimits?: Record<string, number>; providerSpacingMs?: Record<string, number>; maxConcurrentRuns?: number; clock?: Clock; images?: ImageGateway; }
-const actionSchema = z.object({ action: z.enum(['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image', 'followup']), message: z.string().trim().min(1).max(30000).optional(), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().min(1).max(30000).optional(), settings: settingsSchema.optional(), name: z.string().trim().min(1).max(100).optional(), title: z.string().trim().min(1).max(160).optional(), format: z.enum(['json', 'markdown']).optional() }).strict();
+const actionSchema = z.object({ action: z.enum(['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image', 'followup']), message: z.string().max(30000).optional(), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), followUpId: z.string().max(100).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().min(1).max(30000).optional(), settings: settingsSchema.optional(), name: z.string().trim().min(1).max(100).optional(), title: z.string().trim().min(1).max(160).optional(), format: z.enum(['json', 'markdown']).optional() }).strict();
 const ACTIVE: TaskStatus[] = ['queued', 'waiting for cooldown', 'responding'];
-const TRANSIENT = ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE'];
+const TRANSIENT = ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'];
 
 export class FollowUpError extends Error { constructor(message: string) { super(message); this.name = 'FollowUpError'; } }
 /** No agents or tools are given to debate participants: only bounded text/image calls. */
@@ -36,11 +37,11 @@ export class DebateService {
   async operation(input: unknown): Promise<unknown> {
     const q = actionSchema.parse(input);
     if (q.message !== undefined && q.action !== 'followup') throw new FollowUpError('New conversation messages are accepted only with the followup action.');
-    if (q.images?.length && q.action !== 'start') throw new ImageInputError('Image uploads are accepted only when starting a new debate.');
+    if (q.images?.length && q.action !== 'start' && q.action !== 'followup') throw new ImageInputError('Image uploads are accepted only when starting or continuing a debate.');
     if (q.action === 'snapshot') { if (!this.runs.size) await this.refreshCatalog(); return this.snapshot(); }
     if (q.action === 'get') return this.get(requireField(q.id, 'id'));
     if (q.action === 'export') return exportSession(this.get(requireField(q.id, 'id')), requireField(q.format, 'format'));
-    if (q.action === 'image') { const s = this.get(requireField(q.id, 'id')), image = s.images[requireField(q.imageIndex, 'imageIndex')]; if (!image) throw new ImageInputError('Image not found in this debate session.'); return this.images.read(image); }
+    if (q.action === 'image') { const s = this.get(requireField(q.id, 'id')); const images = q.followUpId ? s.followUps.find(turn => turn.id === q.followUpId)?.images : s.images; const image = images?.[requireField(q.imageIndex, 'imageIndex')]; if (!image) throw new ImageInputError('Image not found in this debate message.'); return this.images.read(image); }
     // Mutations serialize across GUI + tool callers; running inference never holds this lock.
     const result = this.mutation.catch(() => {}).then(async () => {
       switch (q.action) {
@@ -48,8 +49,8 @@ export class DebateService {
         case 'start': return this.start(requireField(q.question, 'question'), q.settings ?? this.preferences.settings, q.images);
         case 'rerun': { const s = this.get(requireField(q.id, 'id')); return this.start(s.question, s.settings, undefined, s.images, s.followUps); }
         case 'followup': {
-          if (q.settings !== undefined || q.images !== undefined) throw new FollowUpError('Follow-up uses the saved participants, settings and original images. Start a new debate to change them.');
-          return this.followUp(requireField(q.id, 'id'), requireField(q.message, 'message'));
+          if (q.settings !== undefined) throw new FollowUpError('Follow-up uses the saved participants and settings. Start a new debate to change them.');
+          return this.followUp(requireField(q.id, 'id'), q.message ?? '', q.images ?? []);
         }
         case 'stop': { const run = this.runs.get(requireField(q.id, 'id')); if (!run) throw new Error('This discussion is not executing.'); await this.stop(run, 'stopped', 'User pressed Stop. No review was started.'); return { stopped: true }; }
         case 'review': return this.reviewAvailable(requireField(q.id, 'id'));
@@ -84,26 +85,32 @@ export class DebateService {
   private async start(question: string, settings: Settings, uploads: EncodedImage[] = [], saved: ImageRef[] = [], priorFollowUps: FollowUp[] = []): Promise<{ id: string }> {
     this.ensureCapacity(); await this.refreshCatalog();
     const effective = validateRun(this.effectiveSettings(settings), this.models);
-    validateImageModels(effective, this.models, uploads.length || saved.length);
+    const retained = conversationImages({ images: saved, followUps: priorFollowUps });
+    validateImageModels(effective, this.models, uploads.length || retained.length);
     const images = saved.length ? structuredClone(saved) : await this.images.admit(uploads);
-    if (saved.length) await this.images.verify(images);
+    if (retained.length) await this.images.verify(retained);
     const now = this.clock.now();
     const s: DebateSession = { schemaVersion: 1, id: randomUUID(), title: question.slice(0, 100), question, images, createdAt: now, updatedAt: now, status: 'running', settings: effective, messages: [], tasks: [], issues: [], followUps: priorFollowUps.map(turn => ({ ...turn, id: randomUUID(), startRound: 1, budgetStart: 0 })), reviews: [], requests: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, usageUnavailable: false, budgetUsed: 0, budgetEstimated: false, round: 0, stage: 'Queued', stageDeadline: now + effective.roundMs, deadline: now + effective.overallMs, startedAt: now, final: null, reviewError: null, stopReason: null, compression: [] };
     await this.repository.save(s); this.preferences.activeId = s.id; this.preferences.settings = structuredClone(settings); await this.savePreferences();
     const run = this.createRun(s); run.done = this.execute(run).finally(() => { run.gate.dispose(); this.runs.delete(s.id); });
     return { id: s.id };
   }
-  private async followUp(id: string, message: string): Promise<{ id: string; followUpId: string }> {
+  private async followUp(id: string, message: string, uploads: EncodedImage[]): Promise<{ id: string; followUpId: string }> {
+    if (!message.trim() && !uploads.length) throw new FollowUpError('Add a message or at least one image to continue this debate.');
     this.ensureCapacity(); const s = this.get(id);
     if (s.status === 'running' || s.status === 'reviewing') throw new FollowUpError('Wait for this discussion to finish, or stop it before sending a follow-up.');
     if (s.followUps.length >= 30) throw new FollowUpError('This debate has reached the limit of 30 follow-up messages. Start a new debate to continue.');
     await this.refreshCatalog();
     s.settings = validateRun(this.effectiveSettings(s.settings), this.models);
-    validateImageModels(s.settings, this.models, s.images.length);
-    await this.images.verify(s.images);
+    const retainedImages = conversationImages(s);
+    validateImageModels(s.settings, this.models, uploads.length || retainedImages.length);
+    await this.images.verify(retainedImages);
+    const newImages = await this.images.admit(uploads);
+    const prospectiveImages = new Set([...retainedImages, ...newImages].map(image => image.attachmentId));
+    if (prospectiveImages.size > 20) throw new ImageInputError('This conversation exceeds the limit of 20 distinct context images. Start a new debate; no image was silently omitted.');
     this.archiveFinal(s);
     const now = this.clock.now(), startRound = Math.max(s.round, this.cycleStart(s), ...s.messages.map(m => m.round), ...s.tasks.map(t => t.round)) + 1;
-    const turn: FollowUp = { id: randomUUID(), text: message, timestamp: now, startRound, budgetStart: s.budgetUsed };
+    const turn: FollowUp = { id: randomUUID(), text: message.trim(), ...(newImages.length ? { images: newImages } : {}), timestamp: now, startRound, budgetStart: s.budgetUsed };
     s.followUps.push(turn); s.final = null; s.reviewError = null; s.stopReason = null; s.endedAt = undefined;
     s.status = 'running'; s.stage = 'Follow-up discussion'; s.deadline = now + s.settings.overallMs;
     s.stageDeadline = now + s.settings.roundMs; s.updatedAt = now;
@@ -202,9 +209,10 @@ export class DebateService {
     await this.refreshCatalog(); const who = s.settings.reviewer ?? s.settings.participants.find(p => p.enabled)!;
     if (!this.models.some(m => m.provider === who.provider && m.model === who.model)) throw new Error(`Reviewer unavailable: ${who.provider}/${who.model}. No substitution made.`);
     // Explicit review is a separately timed operation retained in the same transcript.
-    if (s.images.length) {
+    const retainedImages = conversationImages(s);
+    if (retainedImages.length) {
       if (this.models.find(m => m.provider === who.provider && m.model === who.model)?.imageSupport !== 'supported') throw new ImageInputError('The selected reviewer does not have confirmed image support. No image was omitted.');
-      await this.images.verify(s.images);
+      await this.images.verify(retainedImages);
     }
     this.archiveFinal(s);
     s.status = 'reviewing'; s.deadline = this.clock.now() + s.settings.reviewMs; s.final = null; s.reviewError = null; s.endedAt = undefined;
@@ -213,8 +221,8 @@ export class DebateService {
     return { id };
   }
   private async request(run: Running, p: Participant, snapshot: DebateMessage[], targets: string[], review: boolean): Promise<boolean> {
-    const s = run.session, settings = s.settings;
-    const task: Task = { id: randomUUID(), participantId: p.id, round: s.round, status: 'queued', attempt: 0, queuedAt: this.clock.now() };
+    const s = run.session, settings = s.settings, images = conversationImages(s), imageGroups = conversationImageGroups(s);
+    const task: Task = { id: randomUUID(), participantId: p.id, round: s.round, status: 'queued', attempt: 0, queuedAt: this.clock.now(), attempts: [] };
     s.tasks.push(task); await this.persist(run);
     let content: ReturnType<typeof makePrompt>;
     try { content = makePrompt(s, p, snapshot, s.stage, targets, review); }
@@ -227,46 +235,61 @@ export class DebateService {
       const controller = new AbortController(), abort = () => controller.abort();
       run.abort.signal.addEventListener('abort', abort, { once: true });
       let timer: unknown, alive = true;
+      const attemptState: NonNullable<Task['attempts']>[number] = { attempt, correlationId: randomUUID(), status: 'queued', queuedAt: this.clock.now() };
+      task.attempts!.push(attemptState);
+      const isCurrent = () => alive && task.attempt === attempt && !controller.signal.aborted && !run.abort.signal.aborted;
+      const finishAttempt = () => { attemptState.status = task.status; if (task.startedAt !== undefined) attemptState.startedAt = task.startedAt; if (task.endedAt !== undefined) attemptState.endedAt = task.endedAt; if (task.error !== undefined) attemptState.error = task.error; else delete attemptState.error; if (task.partial) attemptState.partial = task.partial; };
       try {
-        task.attempt = attempt;
-        release = await run.gate.acquire(p.provider, run.abort.signal, s.stageDeadline, status => { if (task.status !== status && !run.abort.signal.aborted) task.status = status; }, readyAt);
+        task.attempt = attempt; task.status = 'queued'; delete task.error; delete task.partial; delete task.startedAt; delete task.endedAt;
+        await this.persist(run);
+        release = await run.gate.acquire(p.provider, run.abort.signal, s.stageDeadline, status => { if (isCurrent()) { task.status = status; attemptState.status = status; } }, readyAt);
         if (run.abort.signal.aborted || this.clock.now() >= s.stageDeadline) throw new Cancelled(run.abort.signal.aborted ? 'STOPPED' : 'DEADLINE');
         const inputEstimate = Buffer.byteLength(content.system + content.prompt, 'utf8');
         const available = settings.tokenBudget === null ? Infinity : settings.tokenBudget - this.cycleBudgetUsed(s) - run.reservedTokens - (review ? 0 : Math.min(4096, Math.ceil(settings.tokenBudget * 0.15)));
         const maxTokens = Math.floor(Math.min(p.options.maxTokens ?? Math.ceil(settings.responseChars / 2), available - inputEstimate));
-        if (maxTokens < 64) { task.status = 'cancelled'; task.error = 'Token budget cannot admit this request (conservative input/output reservation, including final-review token reserve).'; s.stopReason = 'Configured resource budget reached.'; await this.persist(run); return false; }
+        if (maxTokens < 64) { task.status = 'cancelled'; task.error = 'Token budget cannot admit this request (conservative input/output reservation, including final-review token reserve).'; task.endedAt = this.clock.now(); finishAttempt(); s.stopReason = 'Configured resource budget reached.'; await this.persist(run); return false; }
         reservation = inputEstimate + maxTokens; run.reservedTokens += reservation;
         const deadline = Math.min(this.clock.now() + (review ? settings.reviewMs : settings.requestMs), s.stageDeadline, s.deadline);
-        task.status = 'responding'; task.startedAt = this.clock.now(); delete task.partial;
+        task.status = 'responding'; task.startedAt = this.clock.now(); attemptState.status = 'responding'; attemptState.startedAt = task.startedAt; delete task.partial;
         let rejectCancellation!: (reason: Error) => void;
         const cancelled = new Promise<never>((_, reject) => { rejectCancellation = reject; });
-        const onAbort = () => rejectCancellation(new Cancelled(run.abort.signal.aborted ? 'STOPPED' : 'DEADLINE'));
+        const onAbort = () => rejectCancellation(run.abort.signal.aborted ? new Cancelled('STOPPED') : this.clock.now() >= s.stageDeadline ? new Cancelled('DEADLINE') : Object.assign(new Error('Model request timed out.'), { code: 'TIMEOUT' }));
         controller.signal.addEventListener('abort', onAbort, { once: true });
         timer = this.clock.setTimeout(() => controller.abort(), deadline - this.clock.now());
-        const result = await Promise.race([this.adapter.call({ participant: p, system: content.system, prompt: content.prompt, images: s.images, signal: controller.signal, maxTokens,
-          onPrepared: async config => { if (!alive || controller.signal.aborted) throw new Cancelled(); s.requests.push({ taskId: task.id, attempt, timestamp: this.clock.now(), system: content.system, prompt: content.prompt, config, contextIds: content.context.ids, images: structuredClone(s.images), compressed: content.context.compressed }); await this.persist(run); accepted = true; },
-          onText: text => { if (alive && !controller.signal.aborted && !run.abort.signal.aborted && this.clock.now() < deadline) task.partial = text.slice(0, 100000); },
+        const result = await Promise.race([this.adapter.call({ participant: p, system: content.system, prompt: content.prompt, images, imageGroups, correlationId: attemptState.correlationId, signal: controller.signal, maxTokens,
+          onDiagnostics: async diagnostics => { if (isCurrent()) { attemptState.diagnostics = diagnostics; await this.persist(run); } },
+          onPrepared: async config => { if (!isCurrent()) throw new Cancelled(); s.requests.push({ taskId: task.id, attempt, timestamp: this.clock.now(), system: content.system, prompt: content.prompt, config, contextIds: content.context.ids, images: structuredClone(images), compressed: content.context.compressed }); await this.persist(run); accepted = true; },
+          onText: text => { if (isCurrent() && this.clock.now() < deadline) task.partial = text.slice(0, 100000); },
         }), cancelled]).finally(() => controller.signal.removeEventListener('abort', onAbort));
         if (controller.signal.aborted || run.abort.signal.aborted || this.clock.now() >= deadline) throw new Cancelled(run.abort.signal.aborted ? 'STOPPED' : 'DEADLINE');
         this.account(run, result.usage, reservation, accepted); reservation = 0;
+        if (result.diagnostics) attemptState.diagnostics = result.diagnostics;
         const trimmed = result.text, incomplete = result.incomplete || result.text.length > settings.responseChars || (review && !hasReviewSections(result.text));
-        task.status = 'completed'; if (incomplete) task.error = 'Response incomplete: provider output/token limit, missing successful finish, or configured response-length limit exceeded.'; task.endedAt = this.clock.now(); delete task.partial;
+        task.status = incomplete ? 'partial' : 'completed'; delete task.error; if (incomplete) task.error = 'Response incomplete: provider output/token limit, missing successful finish, required review sections, or configured response-length limit exceeded.'; task.endedAt = this.clock.now(); delete task.partial; finishAttempt();
         if (review) {
           if (!trimmed) throw new Error('Empty final review');
           s.final = { text: trimmed, provider: p.provider, model: p.model, timestamp: this.clock.now(), incomplete };
-          if (incomplete) s.reviewError = 'Reviewer output was truncated, incomplete, or missing one of the five required numbered sections; no final review completed.';
+          s.reviewError = incomplete ? 'Reviewer output was truncated, incomplete, or missing one of the five required numbered sections; no final review completed.' : null;
         } else if (trimmed) {
           const message = publish(trimmed, p, snapshot, { id: `m${s.messages.length + 1}`, round: s.round, turn: s.messages.length + 1, stage: s.stage, timestamp: this.clock.now(), incomplete, targets }); s.messages.push(message); updateIssues(s, message);
         }
         await this.persist(run); return true;
       } catch (error) {
         const e = error as Partial<ModelFailure> & { code?: string; message?: string };
+        if (e.diagnostics) attemptState.diagnostics = e.diagnostics;
+        else if (attemptState.diagnostics && (controller.signal.aborted || e.code === 'TIMEOUT')) attemptState.diagnostics = { ...attemptState.diagnostics, phase: 'settled', category: run.abort.signal.aborted ? 'cancelled' : 'interrupted', publicTextLength: task.partial?.length ?? attemptState.diagnostics.publicTextLength };
         if (reservation) { this.account(run, e.usage, reservation, accepted); reservation = 0; }
         const stopped = run.abort.signal.aborted;
-        task.status = stopped ? s.status === 'interrupted' ? 'interrupted' : 'cancelled' : error instanceof Cancelled || e.code === 'TIMEOUT' ? 'timed out' : e.code === 'RATE_LIMIT' ? 'rate limited' : 'failed';
+        if (stopped) { attemptState.status = task.status; attemptState.endedAt = this.clock.now(); return false; }
+        task.status = error instanceof Cancelled || e.code === 'TIMEOUT' ? 'timed out' : e.code === 'RATE_LIMIT' ? 'rate limited' : 'failed';
         task.error = stopped ? 'Run stopped.' : error instanceof Error ? error.message : 'Request failed.'; task.endedAt = this.clock.now();
-        const partial = e.partial ?? task.partial;
-        if (partial && !stopped) {
+        const partialCandidate = e.partial ?? task.partial;
+        const partial = partialCandidate?.trim() ? partialCandidate : undefined;
+        if (partial) attemptState.partial = partial;
+        finishAttempt();
+        // Stop owns its final task states; an older catch must not rewrite them.
+        if (stopped) return false;
+        if (partial) {
           if (review) { s.final = { text: partial, provider: p.provider, model: p.model, timestamp: this.clock.now(), incomplete: true }; }
           else s.messages.push(publish(partial, p, snapshot, { id: `m${s.messages.length + 1}`, round: s.round, turn: s.messages.length + 1, stage: s.stage, timestamp: this.clock.now(), incomplete: true, targets }));
           delete task.partial; // Partial is published with an immutable incomplete label; never retry it.
@@ -276,7 +299,8 @@ export class DebateService {
         if (stopped || partial || !retryable || attempt >= attempts || this.clock.now() >= s.stageDeadline) { if (review && !stopped) s.reviewError = task.error ?? 'Review failed.'; return false; }
         const delay = Math.max(e.retryAfterMs ?? 0, Math.min(settings.backoffMaxMs, Math.max(settings.backoffMs, policy.initialDelayMs ?? 0) * 2 ** (attempt - 1)));
         readyAt = this.clock.now() + delay;
-        task.status = 'waiting for cooldown';
+        task.status = 'waiting for cooldown'; delete task.error; delete task.endedAt;
+        await this.persist(run);
       } finally {
         alive = false; this.clock.clearTimeout(timer); run.abort.signal.removeEventListener('abort', abort); controller.abort(); release?.();
       }
@@ -292,6 +316,9 @@ export class DebateService {
     const s = run.session;
     s.status = status; s.stopReason = reason; s.endedAt = this.clock.now(); run.abort.abort(); run.gate.dispose();
     for (const task of s.tasks) if (ACTIVE.includes(task.status)) {
+      const attempt = task.attempts?.at(-1);
+      if (attempt && task.partial) attempt.partial = task.partial;
+      if (attempt?.diagnostics) attempt.diagnostics = { ...attempt.diagnostics, phase: 'settled', category: 'cancelled', publicTextLength: task.partial?.length ?? attempt.diagnostics.publicTextLength };
       if (task.partial) {
         const p = s.settings.participants.find(p => p.id === task.participantId);
         if (p) s.messages.push(publish(task.partial, p, s.messages, { id: `m${s.messages.length + 1}`, round: task.round, turn: s.messages.length + 1, stage: s.stage, timestamp: this.clock.now(), incomplete: true, targets: [] }));
@@ -299,6 +326,7 @@ export class DebateService {
         delete task.partial;
       }
       task.status = status; task.endedAt = this.clock.now();
+      if (attempt && attempt.attempt === task.attempt) { attempt.status = status; attempt.endedAt = task.endedAt; if (task.partial) attempt.partial = task.partial; }
     }
     await this.persist(run);
     await run.done;

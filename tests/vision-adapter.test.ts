@@ -78,7 +78,7 @@ test('image requests use prompt-first actual image blocks and unchanged attachme
     onPrepared: async config => { order.push('persist'); persisted = config; assert.equal(seen.streams, 0); await Promise.resolve(); },
     onText: text => { assert.deepEqual(order, ['persist']); onText.push(text); },
   });
-  assert.deepEqual(result, { text: 'Public answer', incomplete: false }); assert.deepEqual(onText, ['Public answer']);
+  assert.equal(result.text, 'Public answer'); assert.equal(result.incomplete, false); assert.equal(result.diagnostics?.category, 'public-text'); assert.deepEqual(onText, ['Public answer']);
   assert.deepEqual(persisted, { provider: 'loop', model: 'model', maxTokens: 1000 });
   const request = seen.requests[0];
   assert.deepEqual(request.messages, [{ role: 'user', content: [{ type: 'text', text: 'Compare these images.' }, { type: 'image', attachment: imageA }, { type: 'image', attachment: imageB }] }]);
@@ -172,6 +172,28 @@ test('abort while image request config is being persisted prevents inference', {
   let started!: () => void; const began = new Promise<void>(resolve => { started = resolve; });
   const pending = call(new DshAdapter(ctx), { signal: controller.signal, onPrepared: async () => { started(); return new Promise(() => {}); } });
   await began; controller.abort(); await assert.rejects(pending, failure('ABORTED')); assert.equal(seen.streams, 0);
+});
+
+test('continuation image groups preserve chronology and inject each durable image once', async () => {
+  const { ctx, seen } = context();
+  await call(new DshAdapter(ctx), { imageGroups: [{ text: 'Original image question', images: [imageA] }, { text: 'User continuation', images: [imageA, imageB] }] });
+  assert.deepEqual(seen.requests[0].messages, [
+    { role: 'user', content: [{ type: 'text', text: 'Compare these images.' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Original image question' }, { type: 'image', attachment: imageA }] },
+    { role: 'user', content: [{ type: 'text', text: 'User continuation' }, { type: 'image', attachment: imageB }] },
+  ]);
+  assert.equal(seen.requests[0].messages.flatMap((m: any) => m.content).filter((b: any) => b.type === 'image').length, 2);
+});
+
+test('continuation image groups cannot silently differ from validated ordered images or bypass capability checks', async () => {
+  for (const groupImages of [[imageB], [], [imageB, imageA]]) {
+    const { ctx, seen } = context();
+    await assert.rejects(call(new DshAdapter(ctx), { imageGroups: [{ text: 'Source', images: groupImages }] }), failure('INVALID_REQUEST'));
+    assert.equal(seen.preparations, 0); assert.equal(seen.streams, 0);
+  }
+  const { ctx, seen } = context(['text'], ['text']);
+  await assert.rejects(call(new DshAdapter(ctx), { images: undefined, imageGroups: [{ text: 'Source', images: [imageA] }] }), failure('IMAGE_UNSUPPORTED'));
+  assert.equal(seen.preparations, 0); assert.equal(seen.streams, 0);
 });
 
 // Actual installed LLM/Cordis service, fake registered provider: no network, image reads, or credentials.

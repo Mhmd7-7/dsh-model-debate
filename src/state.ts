@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { requestDiagnosticsSchema } from './diagnostics.js';
 
 const text = z.string().max(12000);
 export const identitySchema = z.object({ provider: z.string().min(1).max(200), model: z.string().min(1).max(300) }).strict();
@@ -34,7 +35,7 @@ export type ImageRef = z.infer<typeof imageRefSchema>;
 export const encodedImageSchema = z.object({ mediaType: z.enum(imageMediaTypes), data: z.string().min(4).max(28 * 1024 * 1024), name: z.string().max(255).optional() }).strict();
 export type EncodedImage = z.infer<typeof encodedImageSchema>;
 export interface ImagePolicy { available: boolean; maxImages: number; maxImageBytes: number; maxTotalBytes: number; mediaTypes: readonly string[]; }
-export const taskStatusSchema = z.enum(['queued', 'waiting for cooldown', 'responding', 'completed', 'timed out', 'rate limited', 'failed', 'cancelled', 'stopped', 'interrupted']);
+export const taskStatusSchema = z.enum(['queued', 'waiting for cooldown', 'responding', 'completed', 'partial', 'timed out', 'rate limited', 'failed', 'cancelled', 'stopped', 'interrupted']);
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export const claimSchema = z.object({ id: z.string(), text: text });
 export const objectionSchema = z.object({ claimId: z.string(), text: text, evidence: text, verification: text });
@@ -47,11 +48,20 @@ export const messageSchema = z.object({
 export type DebateMessage = z.infer<typeof messageSchema>;
 export const usageSchema = z.object({ inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), totalTokens: z.number().nonnegative().optional() });
 export type Usage = z.infer<typeof usageSchema>;
-export const taskSchema = z.object({ id: z.string(), participantId: z.string(), round: z.number(), status: taskStatusSchema, attempt: z.number(), queuedAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), error: z.string().optional(), partial: z.string().max(100000).optional() });
+export const attemptSchema = z.object({ attempt: z.number().int().positive(), correlationId: z.string(), diagnostics: requestDiagnosticsSchema.optional(), status: taskStatusSchema, queuedAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), error: z.string().optional(), partial: z.string().max(100000).optional() });
+export const taskSchema = z.object({ id: z.string(), participantId: z.string(), round: z.number(), status: taskStatusSchema, attempt: z.number(), queuedAt: z.number(), startedAt: z.number().optional(), endedAt: z.number().optional(), error: z.string().optional(), partial: z.string().max(100000).optional(), legacyError: z.string().optional(), attempts: z.array(attemptSchema).optional() }).transform(task => {
+  // v1 snapshots kept only the latest attempt. Preserve unattributable legacy errors
+  // explicitly, rather than guessing which earlier attempt produced them.
+  if (!task.attempts && task.status === 'completed' && task.error) {
+    if (task.error.startsWith('Response incomplete:')) task.status = 'partial';
+    else if (task.attempt > 1) { task.legacyError = task.error; delete task.error; }
+  }
+  return task;
+});
 export type Task = z.infer<typeof taskSchema>;
 export const issueSchema = z.object({ id: z.string(), claimId: z.string(), ownerId: z.string(), raisedBy: z.string(), text: z.string(), evidence: z.string(), verification: z.string(), resolved: z.boolean(), resolution: z.string().optional() });
 export const reviewSchema = z.object({ text: z.string().max(100000), provider: z.string(), model: z.string(), timestamp: z.number(), incomplete: z.boolean() });
-export const followUpSchema = z.object({ id: z.string(), text: z.string().trim().min(1).max(30000), timestamp: z.number(), startRound: z.number().int().min(1), budgetStart: z.number().nonnegative() });
+export const followUpSchema = z.object({ id: z.string(), text: z.string().max(30000), images: z.array(imageRefSchema).max(4).optional(), timestamp: z.number(), startRound: z.number().int().min(1), budgetStart: z.number().nonnegative() }).refine(turn => !!turn.text.trim() || !!turn.images?.length, 'A follow-up requires text or images');
 export type FollowUp = z.infer<typeof followUpSchema>;
 export const sessionSchema = z.object({
   schemaVersion: z.literal(1), id: z.string(), title: z.string().max(160), question: z.string().max(30000), images: z.array(imageRefSchema).max(20).default([]), createdAt: z.number(), updatedAt: z.number(),
@@ -103,7 +113,7 @@ export function restoreSession(value: unknown): DebateSession {
   const s = sessionSchema.parse(value);
   if (s.status === 'running' || s.status === 'reviewing') {
     s.status = 'interrupted'; s.stopReason = 'Host restarted or plugin reloaded; no automatic continuation.'; s.endedAt = Date.now();
-    s.tasks = s.tasks.map(t => ['queued', 'waiting for cooldown', 'responding'].includes(t.status) ? { ...t, status: 'interrupted', endedAt: s.endedAt } : t);
+    s.tasks = s.tasks.map(t => ['queued', 'waiting for cooldown', 'responding'].includes(t.status) ? { ...t, status: 'interrupted', endedAt: s.endedAt, attempts: t.attempts?.map(a => ['queued', 'waiting for cooldown', 'responding'].includes(a.status) ? { ...a, status: 'interrupted', endedAt: s.endedAt } : a) } : t);
   }
   return s;
 }

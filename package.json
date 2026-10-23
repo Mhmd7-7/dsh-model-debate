@@ -5,17 +5,82 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/Mhmd7-7/dsh-model-debate.git" },
-  "homepage": "https://github.com/Mhmd7-7/dsh-model-debate#readme",
-  "bugs": { "url": "https://github.com/Mhmd7-7/dsh-model-debate/issues" },
-  "engines": { "node": ">=22", "dsh": "0.2.1-rc.2" },
-  "exports": { ".": "./dist/index.js", "./client": "./dist/client.js", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg" },
-  "files": ["dist", "src", "scripts", "tests", "tsconfig.json", "locale", "icon.svg", "cordis.patch.yml", "README.md", "docs", "LICENSE"],
-  "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-layout"] }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Mhmd7-7/dsh-model-debate.git"
   },
-  "scripts": { "build": "node scripts/build.mjs", "typecheck": "tsc --noEmit", "test": "tsx --test tests/*.test.ts", "check": "npm run typecheck && npm test && npm run build", "smoke": "tsx scripts/smoke.ts" },
-  "dependencies": { "zod": "4.4.3", "@deepseek-ai/schemastery": "3.18.5" },
-  "devDependencies": { "@types/node": "^22.0.0", "@types/react": "^19.0.0", "esbuild": "^0.25.0", "tsx": "^4.20.0", "typescript": "^5.9.0" }
+  "homepage": "https://github.com/Mhmd7-7/dsh-model-debate#readme",
+  "bugs": {
+    "url": "https://github.com/Mhmd7-7/dsh-model-debate/issues"
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": "0.2.1-rc.2"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "tests",
+    "tsconfig.json",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "smoke": "node scripts/test.mjs --smoke"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.5",
+    "katex": "0.19.0",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5",
+    "zod": "4.4.3"
+  },
+  "overrides": {
+    "katex": "$katex"
+  },
+  "devDependencies": {
+    "@types/mdast": "4.0.4",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "19.2.2",
+    "esbuild": "^0.25.0",
+    "micromark-util-types": "2.0.3",
+    "postcss": "8.5.31",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
 }

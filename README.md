@@ -74,9 +74,9 @@ To uninstall, use DSH Plugins → Model Debate → Remove, or `plugin_manager` a
 A result no longer closes the conversation. At the end of a saved debate, use **Continue the conversation** to send a new question, correction, or additional information. Every participant responds to your latest message with the original question, previous discussion, all prior user additions, and earlier reviews in context. The reviewer then updates the synthesis. Your message and the new replies remain in the **same debate**; earlier answers and reviews are retained, not overwritten.
 
 * Wait until the current cycle finishes, or press **Stop**, before sending the next message.
-* Each follow-up starts a fresh bounded cycle using the debate's saved participants/settings and original images. Time, reply limits and optional token allowance apply **per cycle**; usage and exact request logs remain cumulative. It spends provider resources again.
-* Follow-ups are text-only in this version. The original uploaded images remain attached on every turn. To change participants/settings or add different images, start a new debate.
-* Up to **30 follow-ups**, **30,000 characters each**, within the saved shared-context budget. User additions and previous reviews are never silently removed to fit: if the preserved context is too large, sending fails visibly without adding the message.
+* Each follow-up starts a fresh bounded cycle using the debate's saved participants/settings and all original and earlier continuation images. Time, reply limits and optional token allowance apply **per cycle**; usage and exact request logs remain cumulative. It spends provider resources again.
+* A continuation accepts **text, new images, or both**, including an image-only message. Add files, paste, or drop them in the continuation composer; preview and remove them before sending. New images are saved with that user turn and included in later cycles and reviews. The **20 distinct images per conversation** limit is explicit; provider-unsupported models block the send rather than dropping images.
+* Up to **30 follow-ups**, **30,000 characters each**, within the saved shared-context budget. User additions, continuation images and previous reviews are never silently removed to fit: if the preserved context is too large, sending fails visibly without adding the message.
 * A failed/partial follow-up cannot inherit `completed` status from a previous successful cycle. Stop still cancels without launching a review. Re-run starts a fresh debate retaining the original question, images, and all user additions, but not previous model answers.
 
 The agent operation is `model_debate` with `{"action":"followup","id":"…","message":"Here is some additional information…"}`. The GUI uses the same operation.
@@ -86,6 +86,8 @@ The agent operation is `model_debate` with `{"action":"followup","id":"…","mes
 Use **Add images**, paste an image into the composer, or drop image files onto it. PNG, JPEG, WebP and GIF are supported. Review/remove thumbnails before starting. The plugin accepts up to **4 images**, **10 MiB per image**, **20 MiB total**, further restricted by the current DSH attachment policy. A nonempty question is still required.
 
 Images are validated and normalized by DSH's durable attachment service. Each enabled participant **and the final reviewer** must have positively advertised image support; text-only and unknown-capability models are blocked rather than receiving a text placeholder. Choose image-capable models yourself—selection is never silently changed. Every turn, including final review, receives the same ordered original normalized images. Text inside an image is untrusted input, not permission to execute actions.
+
+**Continuation images:** when continuing a debate, new images are admitted as a bounded batch (4 images, 10 MiB each, 20 MiB total per message, subject to the DSH policy), stored against the user follow-up that introduced them, and included once in every later participant and final-review request. The request manifest distinguishes **original** images from each **continuation** image; duplicate attachment content is sent once while both origins remain recorded. Image-only continuations carry an explicit inspect-and-answer instruction so text-only request schemas always receive the original question and discussion context. If a selected model lacks confirmed image support, the continuation is rejected before the user turn is saved; images are never discarded or described as seen by a model that cannot see them.
 
 Saved sessions retain image references and normalized-image previews across reloads. Re-run reuses the saved attachments; it fails visibly if images are missing or a selected model is no longer image-capable. The local DSH attachment backend retains content-addressed image objects; deleting a debate does **not** automatically garbage-collect shared image files.
 
@@ -99,7 +101,7 @@ Saved sessions retain image references and normalized-image previews across relo
 2. Enable 2–20 distinct **provider/model** identities from the active DSH catalog. Four are selected initially when available; two or three are used if that is all the catalog offers. With fewer than two, configure additional routes in DSH Settings → Models. No IDs are invented or silently substituted.
 3. Reorder participants, choose optional visible roles/instructions and supported generation controls. Select a reviewer from the same models or another advertised model. No additional paid reviewer is required.
 4. Enter an English or Arabic question and **Start debate**. Interface language uses DSH's locale service; English and Arabic are supported. Mixed-language messages use automatic text direction and isolated identities.
-5. Watch stage/overall timers, statuses and incomplete streaming previews. Expand structured claims, objections, original provider output, issues and exact request/configuration details.
+5. Watch stage/overall timers, statuses and incomplete streaming previews. Published prose is rendered as safe GitHub-flavored Markdown: headings, emphasis, lists, links, blockquotes, tables, task lists and fenced/indented code; raw HTML is shown as text rather than executed. Inline `$…$`/`\(…\)` and display `$$…$$`/`\[…\]` math use bundled KaTeX with `trust: false` and no remote fonts. Arabic paragraphs and lists follow their first strong prose direction, mixed English is bidi-isolated, and code/math stay LTR. While a response streams, incomplete constructs are shown as readable text until the completed message arrives. Expand structured claims, objections, original provider output, issues and exact request/configuration details.
 6. **Stop** cancels outstanding work and never launches review. Use **Review available discussion** separately if wanted. Final review can fail; that produces an explicit warning rather than a fabricated verdict.
 7. Copy the final answer, export Markdown/JSON, rename/delete inactive sessions, or re-run into a **new** session. Applying/editing settings affects future runs only.
 
@@ -129,6 +131,18 @@ Every enabled setting is schema-validated and saved on the Host: participants/or
 * **Cost budget:** disabled/unavailable. No reliable provider-neutral text-pricing API was exposed by this SDK; the plugin does not invent a price or call estimated costs exact.
 * **Context compression:** deterministic attributed excerpts preserve all structured central claims, objections, corrections, evidence and unresolved issues. Unstructured responses remain verbatim rather than guessing their central claims. Compression is recorded. If the budget cannot preserve that memory, the turn fails visibly rather than silently dropping disagreements.
 
+### Provider output and request diagnostics
+
+Only public answer text is published. Provider reasoning is never retained as an answer or used to bypass an empty-response failure; tool-call chunks are never executed, and this plugin advertises no tools. Tool-only output fails explicitly; mixed public text plus tool calls is published as incomplete. A stream stops at its terminal `finish` event, ignores later or replay content, and preserves available partial public text on interruption. Empty, malformed and truncated responses have distinct failure categories rather than a generic "failed".
+
+Each request attempt carries a plugin-generated correlation ID and a sanitized diagnostic snapshot (provider/model, phase, category, available HTTP status, finish reason, chunk counts, response-field **names** only, reasoning/tool observation flags and public-text length). Failures that cannot be retried safely—authentication, request validation, unsupported images, empty public output, reasoning-only or tool-only output—are not retried. Bounded retries apply only to provider-approved transient categories, and a retry must succeed on its own.
+
+Attempts are tracked separately. A successful retry clears the task's active error but retains earlier failures in **Attempt history**; late callbacks from a cancelled or older attempt cannot overwrite a newer result. Legacy saved tasks that recorded only a stale error are migrated to a separately labeled legacy note (when the producing attempt is unknowable) instead of presenting that error as the current result.
+
+### Verify DeepSeek or any other provider
+
+The activity panel now distinguishes a genuine empty answer from truncated, cancelled or malformed streams. For an empty DeepSeek response, open **Attempt history → Diagnostics** and compare `category`, `finishReason`, `chunks`, `publicTextLength`, `reasoningObserved` and `toolsObserved`. `reasoning-only` means the provider streamed private reasoning but no public text; the plugin will not publish that reasoning. `tool-only` means a tool-call response was received although the plugin advertises no tools. The exact configured endpoint and model mapping remain owned by DSH; this plugin does not read credentials or guess alternate APIs.
+
 ### Host-enforced policy
 
 Plugin Config (ordinary DSH configuration, separate from debate presets) exposes:
@@ -149,7 +163,7 @@ Source modules separate integration (`index`), model adapter (`adapter`), schedu
 
 DSH `storageDomain` owns the `model_debate` domain, version 1. Settings/presets and complete session snapshots are validated and durably written. Model-visible exact prepared requests are stored before dispatch. Reloaded unfinished runs become **interrupted**; no fake execution or automatic continuation is shown. Failed storage writes do not fake a committed cache. Schema/version errors fail visibly rather than delete history.
 
-Only DSH's registered LLM service performs inference, with an empty tool list. API keys, provider endpoints/headers and private provider configuration are never sent to the client, exported or read directly by this plugin. Provider errors are sanitized. User-supplied question/instructions and model answer text are exported by design: do not paste secrets there. Published messages/claim IDs and ownership are assigned and validated by the Host; models cannot change another participant's attribution or rewrite earlier messages. The GUI uses safe React text rendering, never raw model HTML.
+Only DSH's registered LLM service performs inference, with an empty tool list. API keys, provider endpoints/headers and private provider configuration are never sent to the client, exported or read directly by this plugin. Provider errors and diagnostics are sanitized: attempts record provider/model, a plugin-generated correlation ID, available numeric HTTP status, response-field presence, finish reason, chunk counters, public-text length and a closed failure category—never authorization headers, API keys, provider request IDs, message bodies or private conversation text. User-supplied question/instructions and model answer text are exported by design: do not paste secrets there. Published messages/claim IDs and ownership are assigned and validated by the Host; models cannot change another participant's attribution or rewrite earlier messages. The GUI parses model prose into an allowlisted Markdown AST and renders React elements; raw model HTML is displayed literally. KaTeX is the only HTML sink and runs with `trust: false`, bounded expansion and per-equation macros.
 
 The plugin requests concise public rationale, assumptions, evidence, corrections and verification methods—not private chain-of-thought. It provides **no browsing, code execution, autonomous external actions or truth oracle**. Citations supplied by models may remain unverified and are labeled accordingly. The reviewer must disclose corrections, remaining uncertainty and missing participation.
 
@@ -158,15 +172,14 @@ GUI operations and the `model_debate` agent tool call the same validated Host op
 ## Validation
 
 ```powershell
-npm run typecheck
-npm test
-npm run build
+npm run check
 node --check dist/index.js
 node --check dist/client.js
+npm run smoke
 npm pack --dry-run --json
 ```
 
-Tests use deterministic providers and virtual time for initial independence, equal parallel snapshots, sequential visibility, fair targeted hybrid turns, validation, concurrency/start spacing, timeouts/retries, deadline/review reservation, Stop at request/queue/cooldown/backoff, late responses, partial/malformed output, reviewer failure, settings/presets/history/exports and interrupted recovery. Adapter tests cover exact identities/capabilities, sanitized failures, streaming assembly and cancellation.
+`npm test` now compiles the suite and runs Node's test runner without process-isolation pipes, so it also works in a restricted environment; `npm run check` runs typecheck, all tests, then build. Tests use deterministic providers and virtual time for initial independence, equal parallel snapshots, sequential visibility, fair targeted hybrid turns, validation, concurrency/start spacing, timeouts/retries, deadline/review reservation, Stop at request/queue/cooldown/backoff, late responses, partial/malformed output, reviewer failure, settings/presets/history/exports and interrupted recovery. Adapter tests cover exact identities/capabilities, sanitized failures, streaming assembly, first-seen block order, reasoning/tool/empty distinctions, split events, cancellation and diagnostics. Markdown tests cover mixed Arabic/English GFM, tables, links, quotes, code indentation, TeX, unsafe HTML/URLs, every streaming prefix, recursive/oversized math and RTL list markers. Continuation tests cover text+image, image-only, multiple successive images, unsupported models, validation/persistence failure, preview lookup, reopen and legacy records without images. The optional installed-runtime tests add real DSH storage, attachment and LLM-contract checks; they do not turn synthetic provider fixtures into live connectivity.
 
 To also run opt-in tests against this machine's **actual installed DSH/Cordis** runtime:
 
@@ -184,6 +197,7 @@ These test activation/disposal, actual attachment raster validation/normalizatio
 * No provider-neutral pricing or JSON-response-format SDK; structured output is prompt-requested with validated plaintext fallback.
 * No external verification tools. Early issue resolution is participant-reported and cannot prove truth.
 * Single-process storage-domain visibility follows DSH's backend. Very large histories are currently sent as full snapshots; pagination is not implemented.
-* Browser control was not supplied to this task. Live slot registration is verified, but screenshots, rendered light/dark/RTL appearance and manual button interactions are not claimed as tested.
+* A browser-controlled authenticated DSH session was not available in this task. The built client was exercised in real Chrome against an explicitly labeled deterministic fetch fixture (including Arabic RTL, math, code, file selection, paste, drop, validation, failed-send draft retention, image-only sends and saved previews). The authenticated production GUI itself was not visually re-verified; screenshots in this repository's verification notes are fixture screenshots, never presented as live-provider or authenticated-GUI evidence.
+* The installed web profile currently points at `github:Mhmd7-7/dsh-model-debate`. A local rebuild does not replace that installed copy or invalidate Node's module cache: install the built package/checkout through Plugin Manager (or restart the profile) and refresh the GUI to see these changes live.
 
 Detailed integration findings are in `docs/API-NOTES.md`; test/live evidence is in `docs/VERIFICATION.md`.

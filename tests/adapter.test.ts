@@ -77,7 +77,10 @@ test('text chunks deduplicate full blocks and ignore private reasoning/tools', a
   ]);
   const texts: string[] = []; let persisted: PreparedConfig | undefined;
   const result = await call(new DshAdapter(ctx), { onText: text => texts.push(text), onPrepared: async config => { persisted = config; assert.equal(seen.options, undefined); } });
-  assert.deepEqual(result, { text: 'Hello world!', incomplete: false, usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } });
+  assert.equal(result.text, 'Hello world!'); assert.equal(result.incomplete, true); // Tools are never executed or silently considered complete.
+  assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 4, totalTokens: 14 });
+  assert.equal(result.diagnostics?.toolsObserved, true); assert.equal(result.diagnostics?.reasoningObserved, true);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_REASONING|delete_files/);
   assert.deepEqual(texts, ['Hello', 'Hello world', 'Hello world!']);
   assert.deepEqual(persisted, { provider: 'loop', model: 'm1', maxTokens: 1000, reasoningEffort: 'low' });
   assert.deepEqual(seen.options.tools, []); assert.deepEqual(seen.options.messages, [{ role: 'user', content: [{ type: 'text', text: 'Question' }] }]);

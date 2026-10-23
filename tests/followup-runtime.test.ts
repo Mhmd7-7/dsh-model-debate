@@ -8,12 +8,15 @@ import { DebateService } from '../src/engine.js';
 import { Repository } from '../src/persistence.js';
 import { sessionSchema, preferencesSchema } from '../src/state.js';
 import { fixture, finish } from './helpers.js';
+import { DshImages } from '../src/images.js';
+import { conversationImages } from '../src/conversation-images.js';
+import { imageFixture } from './image-fixture.js';
 
 // Real durable backend, deterministic inference. Not a real-provider or browser test.
 test('actual DSH storage retains follow-up turns, all reviews, request context and interruptions across reopen', { skip: !process.env.DSH_RUNTIME_ROOT }, async () => {
   const root = process.env.DSH_RUNTIME_ROOT!;
   const load = (name: string) => import(pathToFileURL(join(root, 'node_modules', '@deepseek-ai', name, 'lib', 'index.js')).href);
-  const [{ Context }, { BackendRegistry }, { DomainFacility }, { JsonStorageBackend }] = await Promise.all([load('cordis'), load('dsh-storage'), load('dsh-storage-domain'), load('dsh-storage-json')]);
+  const [{ Context }, { BackendRegistry }, { DomainFacility }, { JsonStorageBackend }, { LocalAttachmentStore }] = await Promise.all([load('cordis'), load('dsh-storage'), load('dsh-storage-domain'), load('dsh-storage-json'), load('dsh-attachment-local')]);
   const directory = await mkdtemp(join(tmpdir(), 'dsh-debate-followup-test-')), canonical = await realpath(directory);
   assert.ok(basename(canonical).startsWith('dsh-debate-followup-test-'));
   const backend = new JsonStorageBackend(canonical), registry = new BackendRegistry(); registry.register('json', backend);
@@ -31,16 +34,23 @@ test('actual DSH storage retains follow-up turns, all reviews, request context a
       const text = input.participant.id === 'reviewer' ? '1. Answer\nUpdated answer\n2. Reasons\nEvidence\n3. Corrections\nUser update\n4. Disagreement\nSee history\n5. Participation\nSee tasks' : JSON.stringify({ text: 'Response to ' + prompt.latestUserMessage, claims: ['Updated claim'], replyTo: prior.length ? [prior[0].id] : [] });
       input.onText(text); return { text, incomplete: false, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50 } };
     } };
-    const service = new DebateService(adapter, repository); await service.initialize();
-    await service.operation({ action: 'followup', id: f.id, message: 'A newly supplied constraint.' }); await service.waitForIdle();
+    f.adapter.offered = f.adapter.offered.map(model => ({ ...model, imageSupport: 'supported' as const }));
+    const gateway = new DshImages(new LocalAttachmentStore(new Context(), { dshHome: canonical }));
+    const upload = { mediaType: 'image/png', data: imageFixture().toString('base64'), name: 'continuation.png' };
+    const service = new DebateService(adapter, repository, { images: gateway }); await service.initialize();
+    await service.operation({ action: 'followup', id: f.id, message: 'A newly supplied constraint.', images: [upload] }); await service.waitForIdle();
     const completed = repository.get(f.id)!;
     assert.equal(completed.followUps.length, 1); assert.equal(completed.reviews.length, 1); assert.ok(completed.final);
     await repository.flush(); await first.close();
     const second = await facility.open(spec), reopened = new Repository(second);
     assert.deepEqual(reopened.get(f.id), completed);
-    const restored = new DebateService(adapter, reopened); await restored.initialize();
+    const restoredGateway = new DshImages(new LocalAttachmentStore(new Context(), { dshHome: canonical }));
+    const restored = new DebateService(adapter, reopened, { images: restoredGateway }); await restored.initialize();
+    const refs = conversationImages(completed); assert.equal(refs.length, 1);
+    assert.deepEqual(await restored.operation({ action: 'image', id: f.id, followUpId: completed.followUps[0].id, imageIndex: 0 }), await gateway.read(refs[0]));
+    assert.deepEqual(completed.requests.at(-1)!.images, refs);
     const start = calls.length;
-    await restored.operation({ action: 'followup', id: f.id, message: 'Another question after reopening.' }); await restored.waitForIdle();
+    await restored.operation({ action: 'followup', id: f.id, message: '', images: [{ ...upload, name: 'image-only.png' }] }); await restored.waitForIdle();
     const after = reopened.get(f.id)!; assert.equal(after.followUps.length, 2); assert.equal(after.reviews.length, 2);
     for (const call of calls.slice(start)) {
       const prompt = JSON.parse(call.prompt); assert.deepEqual(prompt.userFollowUps.map((turn: { text: string }) => turn.text), after.followUps.map(turn => turn.text));

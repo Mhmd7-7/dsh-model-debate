@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import type { ImageRef, ModelInfo, Participant, Usage } from './state.js';
+import { responseFieldNames, type DiagnosticCategory, type RequestDiagnostics } from './diagnostics.js';
+export { requestDiagnosticsSchema, type RequestDiagnostics } from './diagnostics.js';
 
 export interface PreparedConfig { provider: string; model: string; maxTokens?: number; reasoningEffort?: string; }
 export interface RetryPolicy { maxRetries?: number; retryableCodes?: readonly string[]; initialDelayMs?: number; maxDelayMs?: number; }
 export interface ModelAdapter {
   catalog(): Promise<{ models: ModelInfo[]; diagnostics: string[]; localOnly: boolean }>;
-  call(input: { participant: Participant; system: string; prompt: string; images?: readonly ImageRef[]; signal: AbortSignal; maxTokens: number; onText: (text: string) => void; onPrepared?: (config: PreparedConfig) => Promise<void> }): Promise<{ text: string; incomplete: boolean; usage?: Usage }>;
+  call(input: { participant: Participant; correlationId?: string; system: string; prompt: string; images?: readonly ImageRef[]; imageGroups?: readonly { text: string; images: readonly ImageRef[] }[]; signal: AbortSignal; maxTokens: number; onText: (text: string) => void; onPrepared?: (config: PreparedConfig) => Promise<void>; onDiagnostics?: (diagnostics: RequestDiagnostics) => void | Promise<void> }): Promise<{ text: string; incomplete: boolean; usage?: Usage; diagnostics?: RequestDiagnostics }>;
   retryPolicy(provider: string): RetryPolicy;
 }
 
@@ -14,9 +17,10 @@ export class ModelFailure extends Error {
   readonly retryAfterMs?: number;
   readonly partial?: string;
   readonly usage?: Usage;
-  constructor(message: string, code: string, options: { retryAfterMs?: number; partial?: string; usage?: Usage } = {}) {
+  readonly diagnostics?: RequestDiagnostics;
+  constructor(message: string, code: string, options: { retryAfterMs?: number; partial?: string; usage?: Usage; diagnostics?: RequestDiagnostics } = {}) {
     super(message); this.name = 'ModelFailure'; this.code = code;
-    this.retryAfterMs = options.retryAfterMs; this.partial = options.partial; this.usage = options.usage;
+    this.retryAfterMs = options.retryAfterMs; this.partial = options.partial; this.usage = options.usage; this.diagnostics = options.diagnostics;
   }
 }
 
@@ -48,16 +52,20 @@ export interface AdapterContext {
   settings: { describe(options: { redactSecrets: true }): { ns: string; value: unknown }[] };
 }
 
-const publicCodes = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE', 'ABORTED', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH', 'AUTHENTICATION', 'PERMISSION', 'BAD_REQUEST', 'CONTEXT_LENGTH', 'CONTEXT_LENGTH_EXCEEDED', 'CONTEXT_WINDOW_EXCEEDED', 'MODEL_NOT_FOUND', 'UNKNOWN_MODEL', 'UNSUPPORTED_REASONING_EFFORT', 'UNSUPPORTED_OPTION', 'UNKNOWN_PROVIDER', 'NO_ADAPTER', 'QUOTA', 'ACCOUNT_QUOTA', 'UNAVAILABLE', 'LOCAL_ONLY', 'OUTPUT_LIMIT', 'REQUEST_FAILED']);
+const publicCodes = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'STREAM_CLOSED', 'EMPTY_RESPONSE', 'UNSUPPORTED_TOOLS', 'MALFORMED_RESPONSE', 'INVALID_REQUEST', 'ABORTED', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH', 'AUTHENTICATION', 'PERMISSION', 'BAD_REQUEST', 'CONTEXT_LENGTH', 'CONTEXT_LENGTH_EXCEEDED', 'CONTEXT_WINDOW_EXCEEDED', 'MODEL_NOT_FOUND', 'UNKNOWN_MODEL', 'UNSUPPORTED_REASONING_EFFORT', 'UNSUPPORTED_OPTION', 'UNKNOWN_PROVIDER', 'NO_ADAPTER', 'QUOTA', 'QUOTA_EXCEEDED', 'ACCOUNT_QUOTA', 'ACCOUNT_QUOTA_EXCEEDED', 'UNAVAILABLE', 'LOCAL_ONLY', 'OUTPUT_LIMIT', 'REQUEST_FAILED']);
 // Preserve image/resource codes ahead of HTTP status so invalid inputs never become transient retries.
 const imageFailureCodes = new Set(['IMAGE_UNSUPPORTED', 'IMAGE_CAPABILITY_UNKNOWN', 'IMAGE_OFFLOAD_REQUIRED', 'TOO_MANY_IMAGES', 'IMAGES_TOO_LARGE', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE_BASE64', 'INVALID_IMAGE', 'IMAGE_TYPE_MISMATCH', 'IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE', 'INVALID_ATTACHMENT_REF', 'ATTACHMENT_CORRUPT', 'ATTACHMENT_WRITE_FAILED', 'ATTACHMENT_NOT_FOUND', 'ATTACHMENT_READ_FAILED', 'ATTACHMENT_PROJECTION_UNSUPPORTED']);
-function safeFailure(error: unknown, partial?: string, usage?: Usage): ModelFailure {
-  if (error instanceof ModelFailure) return new ModelFailure(error.message, error.code, { retryAfterMs: error.retryAfterMs, partial: partial || error.partial, usage: usage ?? error.usage });
-  const failure = asObject(error);
+function safeFailure(error: unknown, partial?: string, usage?: Usage, diagnostics?: RequestDiagnostics): ModelFailure {
+  // Whitespace is not a public answer, even on a failure; never publish it as an available partial.
+  partial = partial?.trim() ? partial : undefined;
+  if (error instanceof ModelFailure) return new ModelFailure(error.message, error.code, { retryAfterMs: error.retryAfterMs, partial: partial ?? (error.partial?.trim() ? error.partial : undefined), usage: usage ?? error.usage, diagnostics: diagnostics ?? error.diagnostics });
+  // Installed LlmError stores status/delay in .failure, not on the Error itself.
+  const outer = asObject(error), facts = asObject(outer.failure);
+  const failure = { code: facts.code ?? outer.code, status: facts.status ?? outer.status, providerRetryAfterMs: facts.providerRetryAfterMs ?? outer.providerRetryAfterMs, name: outer.name };
   const code = typeof failure.code === 'string' && imageFailureCodes.has(failure.code) ? failure.code : failure.status === 429 ? 'RATE_LIMIT' : failure.status === 401 || failure.status === 403 ? 'AUTH' : typeof failure.status === 'number' && failure.status >= 500 && failure.status <= 599 ? 'SERVER' : failure.status === 400 ? 'BAD_REQUEST' : typeof failure.code === 'string' && publicCodes.has(failure.code) ? failure.code : failure.name === 'AbortError' ? 'ABORTED' : 'REQUEST_FAILED';
   const message = imageFailureCodes.has(code) ? 'Image input could not be used on the selected model route; check its image support and saved attachments in DSH Settings → Models.' : code === 'ABORTED' ? 'Model request cancelled.' : code === 'RATE_LIMIT' ? 'Provider rate limited this request.' : code === 'MISSING_CREDENTIAL' || code === 'AUTH' || code === 'AUTHENTICATION' ? 'Provider authentication unavailable; check DSH Settings → Models.' : code === 'TIMEOUT' ? 'Model metadata or request timed out.' : 'Model request failed; check the exact model route and provider configuration in DSH Settings → Models.';
   const retryAfterMs = finiteNonnegative(failure.providerRetryAfterMs);
-  return new ModelFailure(message, code, { partial: partial || undefined, usage, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) });
+  return new ModelFailure(message, code, { partial: partial || undefined, usage, diagnostics, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) });
 }
 function asObject(value: unknown): Record<string, any> { return typeof value === 'object' && value !== null ? value as Record<string, any> : {}; }
 function finiteNonnegative(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined; }
@@ -180,10 +188,42 @@ export class DshAdapter implements ModelAdapter {
   }
   async call(input: Parameters<ModelAdapter['call']>[0]): ReturnType<ModelAdapter['call']> {
     const { participant, signal } = input; let text = '', usage: Usage | undefined;
-    let iterator: AsyncIterator<any> | undefined;
+    let iterator: AsyncIterator<unknown> | undefined;
+    const diagnostics: RequestDiagnostics = {
+      version: 1, correlationId: typeof input.correlationId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.correlationId) ? input.correlationId : randomUUID(), provider: participant.provider, model: participant.model,
+      phase: 'preparing', category: 'pending', chunkCount: 0,
+      chunks: { textDelta: 0, reasoningDelta: 0, toolCallDelta: 0, blockStart: 0, blockEnd: 0, usage: 0, finish: 0, unknown: 0, malformed: 0 },
+      responseFields: [], publicTextLength: 0, reasoningObserved: false, toolsObserved: false, toolsPolicy: 'unsupported',
+    };
+    const snapshot = (): RequestDiagnostics => ({ ...diagnostics, chunks: { ...diagnostics.chunks }, responseFields: [...diagnostics.responseFields], publicTextLength: text.length });
+    const publish = async () => { if (input.onDiagnostics) await interruptible(Promise.resolve(input.onDiagnostics(snapshot())), signal); };
+    const malformed = () => { diagnostics.chunks.malformed++; };
+    const fields = new Set<RequestDiagnostics['responseFields'][number]>();
+    const observe = (chunk: Record<string, any>) => {
+      // Inspect only a closed field-name allowlist. Never enumerate provider-controlled keys or retain values.
+      for (const path of responseFieldNames) {
+        let object: unknown = chunk; let present = true;
+        for (const part of path.split('.')) {
+          if (!object || typeof object !== 'object' || !Object.prototype.hasOwnProperty.call(object, part)) { present = false; break; }
+          object = asObject(object)[part];
+        }
+        if (present) fields.add(path);
+      }
+      diagnostics.responseFields = responseFieldNames.filter(field => fields.has(field));
+    };
+    const statusOf = (failure: unknown) => {
+      const outer = asObject(failure), status = asObject(outer.failure).status ?? outer.status;
+      if (Number.isInteger(status) && status >= 100 && status <= 599) diagnostics.status = status;
+    };
+    const noTextCategory = (): DiagnosticCategory => diagnostics.chunks.malformed ? 'malformed' : diagnostics.toolsObserved ? 'tool-only' : diagnostics.reasoningObserved ? 'reasoning-only' : 'empty';
     try {
+      await publish();
+      const imagesSeen = new Set<string>();
+      const groups = input.imageGroups?.map(group => ({ text: group.text, images: group.images.filter(image => !imagesSeen.has(image.attachmentId) && !!imagesSeen.add(image.attachmentId)) }));
+      const images = groups === undefined ? input.images ?? [] : groups.flatMap(group => group.images);
+      if (groups !== undefined && input.images && (images.length !== input.images.length || images.some((image, index) => image.attachmentId !== input.images![index].attachmentId))) throw new ModelFailure('Image request groups do not match the validated ordered images.', 'INVALID_REQUEST');
       const advertised = await this.assertRoute(participant.provider, participant.model, signal);
-      if (input.images?.length) {
+      if (images.length) {
         // This runs for every call/retry, never trusting a previously displayed catalog.
         if (imageSupport(advertised.inputModalities) === 'unsupported') assertImageSupport('unsupported');
         const metadata = await timed(child => this.ctx.llm.resolveModelInfo(participant.provider, participant.model, child), this.timeoutMs, signal);
@@ -192,41 +232,99 @@ export class DshAdapter implements ModelAdapter {
       const prepared = await timed(child => this.ctx.llm.prepareCall({ provider: participant.provider, model: participant.model, maxTokens: Math.min(input.maxTokens, participant.options.maxTokens ?? input.maxTokens), ...(participant.options.reasoningEffort ? { reasoningEffort: participant.options.reasoningEffort } : {}) }, child), this.timeoutMs, signal);
       if (prepared.config.provider !== participant.provider || prepared.config.model !== participant.model) throw new ModelFailure('DSH prepared a different model route; request refused.', 'UNAVAILABLE');
       // The one-shot handle owns the actual adapter generation; never permit DSH's text-only placeholder fallback.
-      if (input.images?.length && prepared.inputModalities !== undefined) assertImageSupport(imageSupport(prepared.inputModalities));
+      if (images.length && prepared.inputModalities !== undefined) assertImageSupport(imageSupport(prepared.inputModalities));
       aborted(signal);
       await interruptible(Promise.resolve(input.onPrepared?.({ provider: prepared.config.provider, model: prepared.config.model, ...(prepared.config.maxTokens === undefined ? {} : { maxTokens: prepared.config.maxTokens }), ...(prepared.config.reasoningEffort === undefined ? {} : { reasoningEffort: prepared.config.reasoningEffort }) })), signal);
       aborted(signal);
       if (this.localOnly && !this.verifiedLocalProviders().has(participant.provider)) throw new ModelFailure('Host local-only policy blocks this provider; no substitution was made.', 'LOCAL_ONLY');
-      iterator = prepared.stream({ ...prepared.config, system: input.system, messages: [{ role: 'user', content: [{ type: 'text', text: input.prompt }, ...(input.images ?? []).map(attachment => ({ type: 'image', attachment }))] }], tools: [], signal })[Symbol.asyncIterator]();
-      const blocks = new Map<number, string>(); let incomplete = true;
-      const update = (index: number, value: string) => {
-        blocks.set(index, value); text = [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, content]) => content).join('');
-        if (text.length > 100000) { text = text.slice(0, 100000); throw new ModelFailure('Model output exceeded the safe response limit.', 'OUTPUT_LIMIT'); }
-        aborted(signal); input.onText(text);
+      diagnostics.phase = 'streaming'; await publish(); aborted(signal);
+      const imageBlocks = (refs: readonly ImageRef[]) => refs.map(attachment => ({ type: 'image', attachment }));
+      const messages = groups === undefined
+        ? [{ role: 'user', content: [{ type: 'text', text: input.prompt }, ...imageBlocks(images)] }]
+        : [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }, ...groups.map(group => ({ role: 'user', content: [{ type: 'text', text: group.text }, ...imageBlocks(group.images)] }))];
+      iterator = prepared.stream({ ...prepared.config, system: input.system, messages, tools: [], signal })[Symbol.asyncIterator]();
+      // Match the SDK BlockAssembler's first-seen ordering and closed-block boundaries.
+      const blocks = new Map<number, { kind: 'text' | 'reasoning' | 'tool-call'; text?: string; closed: boolean }>();
+      const blockOf = (index: unknown, kind: 'text' | 'reasoning' | 'tool-call') => {
+        if (!Number.isSafeInteger(index) || (index as number) < 0) { malformed(); return undefined; }
+        const current = blocks.get(index as number);
+        if (current) { if (current.kind !== kind || current.closed) { malformed(); return undefined; } return current; }
+        if (blocks.size >= 10000) throw new ModelFailure('Provider emitted too many response blocks.', 'MALFORMED_RESPONSE');
+        const block = { kind, closed: false } as { kind: 'text' | 'reasoning' | 'tool-call'; text?: string; closed: boolean };
+        blocks.set(index as number, block); return block;
+      };
+      const update = (block: { text?: string }, value: string) => {
+        block.text = value;
+        const nextText = [...blocks.values()].filter(item => item.kind === 'text').map(item => item.text ?? '').join('');
+        if (nextText.length > 100000) { text = nextText.slice(0, 100000); throw new ModelFailure('Model output exceeded the safe response limit.', 'OUTPUT_LIMIT'); }
+        if (nextText !== text) { text = nextText; aborted(signal); input.onText(text); }
       };
       while (true) {
         const next = await interruptible(iterator.next(), signal);
         if (next.done) break;
-        aborted(signal); const chunk = next.value;
-        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') update(chunk.index, (blocks.get(chunk.index) ?? '') + chunk.text);
-        else if (chunk.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
-          // Full block replaces its deltas rather than being appended a second time.
-          if (blocks.get(chunk.index) !== chunk.block.text) update(chunk.index, chunk.block.text);
-        } else if (chunk.type === 'usage') usage = usageOf(chunk.usage) ?? usage;
-        else if (chunk.type === 'finish') {
-          const reason = chunk.reason;
-          if (reason?.kind === 'aborted') throw new ModelFailure('Model request cancelled.', 'ABORTED');
-          if (reason?.kind === 'error') throw safeFailure(reason.failure, text, usage);
-          incomplete = reason?.kind !== 'stop';
+        aborted(signal); const chunk = asObject(next.value); diagnostics.chunkCount++; observe(chunk);
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+          const isText = chunk.type === 'text-delta'; diagnostics.chunks[isText ? 'textDelta' : 'reasoningDelta']++;
+          if (!isText) diagnostics.reasoningObserved = true;
+          const block = blockOf(chunk.index, isText ? 'text' : 'reasoning');
+          if (typeof chunk.text !== 'string') malformed();
+          else if (isText && block) update(block, (block.text ?? '') + chunk.text);
+          // Reasoning values are not accumulated, stored, exposed, or used as public-answer fallback.
+        } else if (chunk.type === 'block-start' || chunk.type === 'block-end') {
+          const end = chunk.type === 'block-end'; diagnostics.chunks[end ? 'blockEnd' : 'blockStart']++;
+          const value = asObject(chunk.block), kind = end ? value.type : chunk.blockType;
+          if (kind === 'reasoning') diagnostics.reasoningObserved = true;
+          if (kind === 'tool-call') diagnostics.toolsObserved = true;
+          if (kind !== 'text' && kind !== 'reasoning' && kind !== 'tool-call') { malformed(); }
+          const block = kind === 'text' || kind === 'reasoning' || kind === 'tool-call' ? blockOf(chunk.index, kind) : undefined;
+          if (end && block) {
+            if (kind === 'text') { if (typeof value.text === 'string') update(block, value.text); else malformed(); }
+            else if (kind === 'reasoning' && typeof value.text !== 'string') malformed();
+            else if (kind === 'tool-call' && (typeof value.id !== 'string' || typeof value.name !== 'string' || typeof value.arguments !== 'string')) malformed();
+            block.closed = true;
+          }
+        } else if (chunk.type === 'tool-call-delta') {
+          diagnostics.chunks.toolCallDelta++; diagnostics.toolsObserved = true; blockOf(chunk.index, 'tool-call');
+          if (typeof chunk.id !== 'string' || typeof chunk.argumentsDelta !== 'string' || (chunk.name !== undefined && typeof chunk.name !== 'string')) malformed();
+        } else if (chunk.type === 'usage') {
+          diagnostics.chunks.usage++; const parsed = usageOf(chunk.usage); if (parsed) usage = parsed; else malformed();
+        } else if (chunk.type === 'finish') {
+          diagnostics.chunks.finish++; const reason = asObject(chunk.reason), kind = reason.kind;
+          diagnostics.finishReason = kind === 'stop' || kind === 'max-tokens' || kind === 'tool-calls' || kind === 'error' || kind === 'aborted' ? kind : 'unknown';
+          if (kind === 'aborted') { statusOf(reason.failure); throw new ModelFailure('Model request cancelled.', 'ABORTED'); }
+          if (kind === 'error') {
+            statusOf(reason.failure);
+            if (typeof asObject(reason.failure).code !== 'string' && !(Number.isInteger(asObject(reason.failure).status) && asObject(reason.failure).status >= 100 && asObject(reason.failure).status <= 599)) { malformed(); throw new ModelFailure('Provider returned a malformed terminal failure.', 'MALFORMED_RESPONSE'); }
+            if (asObject(reason.failure).code === 'EMPTY_RESPONSE' && !text.trim() && diagnostics.toolsObserved) throw new ModelFailure('Provider requested tools, but Model Debate does not support tools; no tool was executed and no public answer was returned.', 'UNSUPPORTED_TOOLS');
+            throw safeFailure(reason.failure, text, usage);
+          }
+          if (kind === 'tool-calls') diagnostics.toolsObserved = true;
+          if (diagnostics.finishReason === 'unknown') malformed();
+          // Finish is terminal by SDK contract. Never scan replayState or fetch chunks after it.
           break;
-        }
-        // Private reasoning, tool calls, replay state and unknown chunks are never retained/executed.
+        } else { diagnostics.chunks.unknown++; malformed(); }
+        if (diagnostics.chunkCount % 32 === 0) await publish();
       }
       aborted(signal);
-      if (!text.trim()) throw new ModelFailure('Provider returned no public response text.', 'EMPTY_RESPONSE');
-      return { text, incomplete, ...(usage ? { usage } : {}) };
-    } catch (error) { throw safeFailure(error, text, usage); }
-    finally {
+      if (!text.trim()) {
+        if (diagnostics.chunks.malformed) throw new ModelFailure('Provider returned malformed response chunks with no public answer.', 'MALFORMED_RESPONSE');
+        if (diagnostics.toolsObserved) throw new ModelFailure('Provider requested tools, but Model Debate does not support tools; no tool was executed and no public answer was returned.', 'UNSUPPORTED_TOOLS');
+        if (diagnostics.reasoningObserved) throw new ModelFailure('Provider returned reasoning without a public answer. Reasoning is not used as answer text; check output limits and model configuration.', 'EMPTY_RESPONSE');
+        throw new ModelFailure('Provider returned no public response text.', 'EMPTY_RESPONSE');
+      }
+      diagnostics.phase = 'settled';
+      diagnostics.category = diagnostics.chunks.malformed ? 'malformed' : !diagnostics.finishReason ? 'interrupted' : 'public-text';
+      const incomplete = diagnostics.finishReason !== 'stop' || diagnostics.toolsObserved || diagnostics.chunks.malformed > 0;
+      await publish();
+      return { text, incomplete, ...(usage ? { usage } : {}), diagnostics: snapshot() };
+    } catch (error) {
+      statusOf(error); const failure = safeFailure(error, text, usage), phase = diagnostics.phase;
+      diagnostics.phase = 'settled';
+      diagnostics.category = failure.code === 'ABORTED' ? 'cancelled' : failure.code === 'OUTPUT_LIMIT' ? 'output-limit' : failure.code === 'MALFORMED_RESPONSE' ? 'malformed' : failure.code === 'UNSUPPORTED_TOOLS' ? 'tool-only' : failure.code === 'EMPTY_RESPONSE' ? noTextCategory() : failure.code === 'STREAM_CLOSED' || failure.code === 'TRANSPORT' ? 'interrupted' : phase === 'preparing' ? 'request-rejected' : 'provider-error';
+      // Error metadata always carries the terminal snapshot even if persistence or cancellation rejects the callback.
+      try { await publish(); } catch { /* Preserve the original failure and terminal diagnostics. */ }
+      throw safeFailure(failure, text, usage, snapshot());
+    } finally {
       // Calling return requests cleanup, but a broken provider must not hold cancellation hostage.
       if (iterator?.return) { try { const cleanup = iterator.return(); void Promise.resolve(cleanup).catch(() => undefined); } catch { /* Ignore provider cleanup error. */ } }
     }

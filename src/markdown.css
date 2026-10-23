@@ -1,0 +1,102 @@
+/* Model text only. KaTeX's stylesheet is prefixed to this scope at build time. */
+.mdb-markdown {
+  min-width: 0;
+  max-width: 100%;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: start;
+}
+.mdb-markdown p,
+.mdb-markdown li,
+.mdb-markdown blockquote,
+.mdb-markdown th,
+.mdb-markdown td {
+  unicode-bidi: plaintext;
+}
+.mdb-markdown p {
+  margin-block: .7em;
+  white-space: pre-wrap;
+  tab-size: 4;
+}
+.mdb-markdown > :first-child { margin-block-start: 0; }
+.mdb-markdown > :last-child { margin-block-end: 0; }
+.mdb-markdown h1,
+.mdb-markdown h2,
+.mdb-markdown h3,
+.mdb-markdown h4,
+.mdb-markdown h5,
+.mdb-markdown h6 {
+  margin-block: 1.1em .45em;
+  line-height: 1.4;
+  font-weight: 650;
+  unicode-bidi: plaintext;
+}
+.mdb-markdown h1 { font-size: 1.65em; }
+.mdb-markdown h2 { font-size: 1.4em; }
+.mdb-markdown h3 { font-size: 1.2em; }
+.mdb-markdown h4,
+.mdb-markdown h5,
+.mdb-markdown h6 { font-size: 1em; }
+.mdb-markdown ul,
+.mdb-markdown ol { margin-block: .65em; padding-inline-start: 1.7em; }
+.mdb-markdown li + li { margin-block-start: .25em; }
+.mdb-markdown li > p { margin-block: .25em; }
+.mdb-markdown blockquote {
+  margin-inline: 0;
+  margin-block: .85em;
+  padding-inline: 1em;
+  border-inline-start: 3px solid var(--mdb-border, var(--dsw-alias-border-l1));
+  color: var(--mdb-muted, var(--dsw-alias-label-secondary));
+}
+.mdb-markdown a { color: var(--mdb-brand, var(--dsw-alias-brand-primary)); text-decoration: underline; text-underline-offset: .15em; }
+.mdb-markdown a:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.mdb-markdown .mdb-inert-link { text-decoration: none; }
+.mdb-markdown hr { border: 0; border-block-start: 1px solid var(--mdb-border, var(--dsw-alias-border-l1)); margin-block: 1.2em; }
+.mdb-markdown .mdb-code-block,
+.mdb-markdown .mdb-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: .9em;
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+  background: var(--dsw-alias-bg-layer-2);
+  border-radius: 5px;
+  tab-size: 4;
+}
+.mdb-markdown .mdb-inline-code { padding: .15em .35em; white-space: break-spaces; overflow-wrap: anywhere; }
+.mdb-markdown .mdb-code-block {
+  display: block;
+  margin-block: .85em;
+  padding: .85em 1em;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre;
+  overflow-wrap: normal;
+  line-height: 1.55;
+}
+.mdb-markdown .mdb-code-block code { font: inherit; white-space: inherit; color: inherit; }
+.mdb-markdown .mdb-table-scroll { max-width: 100%; overflow-x: auto; margin-block: 1em; }
+.mdb-markdown table { width: 100%; border-collapse: collapse; font-size: .95em; }
+.mdb-markdown th,
+.mdb-markdown td { border: 1px solid var(--mdb-border, var(--dsw-alias-border-l1)); padding: .45em .7em; min-width: 5em; vertical-align: top; text-align: start; }
+.mdb-markdown th { font-weight: 650; background: var(--dsw-alias-bg-layer-2); }
+.mdb-markdown .mdb-task-item > input { margin-inline: 0 .5em; vertical-align: middle; accent-color: var(--mdb-brand, var(--dsw-alias-brand-primary)); }
+.mdb-markdown .mdb-task-item > input + p { display: inline; }
+.mdb-markdown .mdb-image-alt { font-style: italic; }
+.mdb-markdown .mdb-literal-html { white-space: pre-wrap; }
+.mdb-markdown .mdb-math {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+  white-space: normal;
+  max-width: 100%;
+}
+.mdb-markdown span.mdb-math { display: inline-block; vertical-align: baseline; }
+.mdb-markdown .mdb-math-display { display: block; margin-block: .85em; overflow-x: auto; overflow-y: hidden; }
+.mdb-markdown span.mdb-math-display { display: block; }
+.mdb-markdown .mdb-math-fallback { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.mdb-markdown .katex-display { margin-block: 0; }
+.mdb-markdown .katex { white-space: nowrap; text-align: initial; unicode-bidi: isolate; }
+.mdb-markdown .katex .base,
+.mdb-markdown .katex .strut { box-sizing: content-box; }

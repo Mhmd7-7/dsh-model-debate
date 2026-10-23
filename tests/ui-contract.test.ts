@@ -42,30 +42,31 @@ test('image selection blocks unsupported and unknown models and explicitly label
 });
 test('persisted previews are scoped to stored session images, allowlisted, cached and canceled logically', async () => {
   const source = await readFile(new URL('../src/client.tsx', import.meta.url), 'utf8');
-  assert.match(source, /request<unknown>\('image', \{ id: sessionId, imageIndex \}\)/);
+  assert.match(source, /request<unknown>\('image', \{ id: sessionId, imageIndex, .*followUpId/);
   assert.match(source, /safeImageDataUrl\(result\.mediaType, result\.data\)/);
   assert.match(source, /result\.mediaType !== image\.mediaType \|\| checked\.bytes !== image\.bytes/);
   assert.match(source, /if \(!current \|\| !alive\) return/); assert.match(source, /return \(\) => \{ current = false; \}/);
-  assert.match(source, /previewCacheSession !== snapshot\.activeId/); assert.match(source, /savedImageCache\.size < MAX_IMAGES/);
+  assert.match(source, /previewCacheSession !== snapshot\.activeId/); assert.match(source, /savedImageCache\.size < 20/);
   assert.match(source, /<SessionImages session=\{s\}/); assert.match(source, /image\.originalDimensions/);
   assert.match(source, /<img src=\{preview\} alt=\{label\}/); assert.match(source, /<img src=\{image\.preview\} alt=/);
   assert.ok(!/src=\{(?:image\.attachmentId|result\.data|image\.url)\}/.test(source));
 });
-test('follow-up composer is same-session, text-only, bounded and retains drafts until accepted', async () => {
+test('follow-up composer is same-session, supports attachments and retains drafts until accepted', async () => {
   const source = await readFile(new URL('../src/client.tsx', import.meta.url), 'utf8');
   const composer = source.slice(source.indexOf('function FollowUpComposer('), source.indexOf('function SessionView('));
   assert.match(source, /const followUpDrafts = new Map<string, string>\(\)/);
   assert.match(source, /MAX_FOLLOW_UP_DRAFTS = 30/); assert.match(source, /MAX_FOLLOW_UP_CHARS = 30000/);
   assert.match(source, /while \(followUpDrafts\.size > MAX_FOLLOW_UP_DRAFTS\)/);
   assert.match(composer, /followUpDrafts\.get\(session\.id\)/);
-  assert.match(composer, /act\('followup', \{ id: session\.id, message: text \}\)/);
-  assert.match(composer, /if \(result\) setFollowUpDraft\(session\.id, ''\)/);
+  assert.match(composer, /act\('followup', \{ id: session\.id, message: text,/);
+  assert.match(composer, /if \(result\) \{ setFollowUpDraft\(session\.id, ''\); setFollowUpImages/);
   assert.match(composer, /const disabled = busy \|\| running \|\| sending/);
   assert.match(composer, /followUpPending\.has\(session\.id\)/);
   assert.match(composer, /!event\.nativeEvent\.isComposing/); assert.match(composer, /event\.nativeEvent\.keyCode !== 229/);
   assert.match(composer, /event\.ctrlKey \|\| event\.metaKey/); assert.match(composer, /!event\.repeat/);
   assert.match(composer, /dir="auto"/); assert.match(composer, /t\(running \? 'Follow-up wait'/);
-  assert.ok(!composer.includes('type="file"')); assert.ok(!composer.includes('images:')); assert.ok(!composer.includes('settings:'));
+  assert.match(composer, /<ImageComposer .*owner=\{session.id\}/); assert.match(composer, /images: attachments.images.map/); assert.ok(!composer.includes('settings:'));
+  assert.match(composer, /onPaste=/); assert.match(composer, /onDrop=/); assert.match(composer, /attachments.reading/);
   assert.match(source, /<FollowUpComposer session=\{s\}/);
   for (const key of ['Continue this debate', 'Follow-up wait', 'Follow-up resource hint', 'Follow-up image hint', 'Send follow-up', 'Follow-up message', 'Previous synthesis', 'You']) assert.ok(en[key] && ar[key], `Missing follow-up translation: ${key}`);
 });
@@ -80,8 +81,8 @@ test('transcript interleaves attributed user follow-ups and archived reviews at 
   assert.match(transcript, /followUp\.startRound === round/); assert.match(transcript, /review\.afterRound === round/);
   assert.ok(transcript.indexOf('followUp.startRound === round') < transcript.indexOf('message.round === round'));
   assert.ok(transcript.indexOf('message.round === round') < transcript.indexOf('review.afterRound === round'));
-  assert.match(transcript, /t\('You'\)/); assert.match(transcript, /<Plain>\{followUp\.text\}<\/Plain>/);
-  assert.match(transcript, /<Plain>\{review\.text\}<\/Plain>/); assert.match(source, /<Plain>\{s\.final\.text\}<\/Plain>/);
+  assert.match(transcript, /t\('You'\)/); assert.match(transcript, /followUp\.text \|\| t\('Image-only follow-up'\)/);
+  assert.match(transcript, /<Markdown labels=\{participantLabels\(s\)\}>\{review\.text\}<\/Markdown>/); assert.match(source, /<Markdown labels=\{participantLabels\(s\)\}>\{s\.final\.text\}<\/Markdown>/);
 });
 test('Client CSS uses inspected theme tokens rather than hardcoded UI colors', async () => {
   const css = await readFile(new URL('../src/client.css', import.meta.url), 'utf8');

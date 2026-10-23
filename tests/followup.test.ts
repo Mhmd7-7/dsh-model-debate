@@ -105,20 +105,20 @@ test('follow-up preserves one conversation, archives reviews, and runs a fresh b
   }
 });
 
-test('follow-up text is trimmed, nonempty, and at most 30000 characters; settings and images are forbidden', async () => {
+test('follow-up text is bounded and requires text or images; settings overrides are forbidden', async () => {
   const f = await completedFixture();
   const base = { action: 'followup', id: f.id, message: 'new info' };
   const invalid = [
     { action: 'followup', id: f.id }, { ...base, message: '' }, { ...base, message: ' \n\t ' },
     { ...base, message: 'x'.repeat(30001) }, { ...base, message: 42 }, { ...base, id: null },
     { action: 'followup', message: 'new info' }, { ...base, settings: f.settings },
-    { ...base, images: [] }, { ...base, images: [{ mediaType: 'image/png', data: 'eA==' }] },
+    { ...base, images: [{ mediaType: 'image/png', data: 'eA==' }] },
   ];
   for (const input of invalid) await rejectsWithoutCommit(f, input);
   const publicOperation = createOperation(f.service);
   for (const input of invalid) assert.equal((await publicOperation(input)).ok, false, 'GUI/tool validation must reject the same invalid inputs');
   const message = 'x'.repeat(30000);
-  assert.equal((await publicOperation({ ...base, message: ` \n${message}\t ` })).ok, true);
+  assert.equal((await publicOperation({ ...base, message })).ok, true);
   await finish(f.service, f.clock);
   assert.equal(f.repo.get(f.id)!.followUps.at(-1)!.text, message);
 });

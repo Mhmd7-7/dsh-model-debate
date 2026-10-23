@@ -1,0 +1,20 @@
+{
+  "kind": "built plugin UI with synthetic fetch; not live DSH",
+  "checks": [
+    "Arabic GFM/math/code rendering",
+    "safe HTML",
+    "readable participant labels",
+    "file selection",
+    "remove",
+    "clipboard paste",
+    "drop",
+    "validation error",
+    "failed submit retains draft and images",
+    "text plus image submit",
+    "image-only submit",
+    "multiple continuation turns",
+    "persisted preview read"
+  ],
+  "pageErrors": [],
+  "followUps": 2
+}
