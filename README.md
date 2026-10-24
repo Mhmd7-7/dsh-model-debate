@@ -4,6 +4,10 @@ A complete, self-contained DSH bundle for observing an evidence-first exchange b
 
 **Compatibility checked:** DSH **0.2.1-rc.2**, Cordis **4.0.5**, DSH LLM/storage/Client packages **0.2.1-rc.2**, Node **26.3.0** (runtime requirement Node 22.3+). Versions are deliberately pinned: this plugin does not grant a compatibility exemption on another DSH version.
 
+## v1.3.3 — Document attachments
+
+Attach PDF, DOCX, text, Markdown, CSV and source files to initial messages and follow-ups, including file-only messages. Extracted content persists with the conversation and is supplied as bounded, source-referenced excerpts to every participant and reviewer. Includes Arabic/RTL support, backend validation and configurable limits. Raw document binaries are not retained; OCR is not integrated. See [attachment details and verification](docs/ATTACHMENTS.md).
+
 ## Installation
 
 **Requires:** DeepSeek Harness **0.2.1-rc.2**, Node.js **22.3 or newer**, and at least **two configured model routes** for running a debate. Install this as a **DSH plugin**, not a standalone application.
