@@ -1,8 +1,36 @@
 # Verification report
 
-Current package version: **1.3.1**. Earlier sections documenting v1.1/v1.2 remain historical evidence for those versions; the 23 October section below records the current implementation.
+Current package version: **1.3.2**. Earlier sections documenting v1.1/v1.2 remain historical evidence for those versions; the 23 October section below records the current implementation.
 
 Tested on **22 October 2026** against the existing DSH GUI at **http://127.0.0.1:3080**.
+
+## Panel crash audit — 24 October 2026 (local fix after 1.3.1)
+
+The prior conclusion that the broken Debate panel was probably browser cache/authentication was **not supported**. A generic fixture succeeded, but replaying the exact production `dist/client.js` against the real saved sessions reproduced a code fault: the selected final review in `b3ddcd1b-…` threw `RangeError: Cannot access index 334 in a splice buffer of size 334`. React then removed the panel. No authentication failure was needed to reproduce this.
+
+Minimal synthetic reproduction (no user's conversation copied into tests):
+
+```markdown
+Text:
+\[
+x^2 = 4
+\]
+```
+
+**Cause:** the custom backslash-math micromark extension consumed multiple lines as one void token without data and `lineEnding` child events. This corrupted micromark's linked text-chunk/splice bookkeeping. The extension now emits correctly delimited per-line events. A guarded, bounded parser also falls back to the exact literal original source with a generic formatting warning, so a parser fault cannot blank the whole panel. No raw stack/error text or private output is logged or published by this fallback.
+
+Additional confirmed interaction fixes: responsive styles now query the actual plugin container width instead of the whole browser viewport; New debate closes the Settings pane so the composer is not hidden on a narrow center column; mutation admission persists across Chat/Debate unmount/remount. API fetch and JSON decoding share a 30-second cancellable deadline, releasing a stalled snapshot/action instead of freezing the panel indefinitely. A timed-out mutation warns that the server may have accepted it and is never retried automatically.
+
+**Checks actually run on this local fix:**
+
+* `npm run check`: strict typecheck, 185 tests (177 passed, 8 optional runtime skips), production build passed.
+* With `DSH_RUNTIME_ROOT` set: **185/185 passed, zero failures/skips**.
+* `npm run test:browser`: exact `dist/client.js` loaded in real Chrome (not a re-bundle of the Client source), synthetic multiline-math regression, English/Arabic, StrictMode, fixed-height DSH-like host slot, width 744 inside a desktop viewport, settings/history/new navigation, draft retention and pending-operation lock across remount: passed with zero page errors.
+* The same browser runner replayed **all five real saved debates locally** in both languages, including the previously crashing review: passed with zero page errors. The private snapshot stayed under ignored `node_modules/.cache`; it was not committed, sent to any provider, or copied to screenshots/docs.
+* Existing file-selection/paste/drop/continuation-image Chrome checks passed; deterministic smoke and syntax checks passed.
+* Installed 1.3.1 bundles matched the pre-fix repository hashes. This audit rebuilt the workspace only; it did not overwrite installed plugin files, alter the profile, restart DSH, or claim that the authenticated production tab has received the patch. Install this local build through Plugin Manager and refresh the existing GUI to activate it. No replacement server was started.
+
+Browser command requirements: Python Playwright and installed Chrome. Run `npm run build`, then `npm run test:browser`. To explicitly replay a locally prepared private snapshot use `node scripts/check-client-browser.mjs --saved <local-snapshot.json>`; this read-only playback never dispatches real provider requests or writes back to the DSH store.
 
 ## Runtime and APIs actually checked
 

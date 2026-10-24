@@ -88,6 +88,18 @@ test('Client CSS uses inspected theme tokens rather than hardcoded UI colors', a
   const css = await readFile(new URL('../src/client.css', import.meta.url), 'utf8');
   assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(css)); assert.match(css, /--dsw-alias-bg-base/); assert.match(css, /prefers-reduced-motion/); assert.match(css, /dir=rtl/);
 });
+test('panel uses its own available width and retains mutation admission across remounts', async () => {
+  const source = await readFile(new URL('../src/client.tsx', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../src/client.css', import.meta.url), 'utf8');
+  assert.match(css, /container-name:mdb-panel/);
+  assert.match(css, /@container mdb-panel \(max-width:760px\)/);
+  assert.ok(!/@media\(max-width:/.test(css), 'layout must follow the DSH main slot, not browser viewport');
+  assert.ok(source.indexOf('let operationBusy = false') < source.indexOf('function App()'));
+  assert.match(source, /useSyncExternalStore\(subscribeOperation, \(\) => operationBusy/);
+  assert.match(source, /if \(operationBusy\) return null/);
+  assert.match(source, /setHistoryOpen\(false\); setSettingsOpen\(false\); setAttempted\(false\)/);
+  assert.match(source, /requestOperation<T>\(\{ baseUrl: document.baseURI/);
+});
 test('metadata, icon exports, and runtime artifacts are included in distribution', async () => {
   const packageJSON = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(packageJSON.exports['./client'], './dist/client.js'); assert.equal(packageJSON.dsh.client.platform, 'web'); assert.ok(packageJSON.files.includes('tests')); assert.ok(packageJSON.files.includes('scripts'));

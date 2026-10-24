@@ -181,6 +181,12 @@ npm pack --dry-run --json
 
 `npm test` now compiles the suite and runs Node's test runner without process-isolation pipes, so it also works in a restricted environment; `npm run check` runs typecheck, all tests, then build. Tests use deterministic providers and virtual time for initial independence, equal parallel snapshots, sequential visibility, fair targeted hybrid turns, validation, concurrency/start spacing, timeouts/retries, deadline/review reservation, Stop at request/queue/cooldown/backoff, late responses, partial/malformed output, reviewer failure, settings/presets/history/exports and interrupted recovery. Adapter tests cover exact identities/capabilities, sanitized failures, streaming assembly, first-seen block order, reasoning/tool/empty distinctions, split events, cancellation and diagnostics. Markdown tests cover mixed Arabic/English GFM, tables, links, quotes, code indentation, TeX, unsafe HTML/URLs, every streaming prefix, recursive/oversized math and RTL list markers. Continuation tests cover text+image, image-only, multiple successive images, unsupported models, validation/persistence failure, preview lookup, reopen and legacy records without images. The optional installed-runtime tests add real DSH storage, attachment and LLM-contract checks; they do not turn synthetic provider fixtures into live connectivity.
 
+### Exact built-client browser regressions
+
+After `npm run build`, run `npm run test:browser` (requires Python Playwright and installed Chrome). Unlike source-only fixtures, this loads **the actual `dist/client.js`** inside a fixed-height, narrow DSH-like slot. It checks multiline `\\[...\\]` math (including a previously confirmed whole-panel parser crash), English/Arabic, real container sizing, Settings/History/New navigation, retained drafts, and mutation admission across Chat/Debate remounts. Provider execution stays disabled. Optional local saved-snapshot playback is supported by `node scripts/check-client-browser.mjs --saved <local-snapshot.json>`; keep private snapshots outside tracked files.
+
+If an answer's formatting cannot be parsed, the panel shows the original text with a warning rather than blanking the whole UI. Browser requests have a 30-second deadline covering fetch and JSON decoding; uncertain timed-out mutations are not automatically retried.
+
 To also run opt-in tests against this machine's **actual installed DSH/Cordis** runtime:
 
 ```powershell

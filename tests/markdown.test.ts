@@ -64,6 +64,40 @@ test('display math retains actual closing-fence state inside quotes and lists', 
   assert.match(render('> $$\n> x^2'), /mdb-math-fallback/);
 });
 
+test('multiline backslash math respects micromark text-chunk boundaries in paragraphs, lists and quotes', () => {
+  const fixtures = [
+    'Text:\n\\[\nx=y+z\n\\]',
+    '- Text:\n  \\[\n  x=y+z\n  \\]\n  after.\n- next',
+    '> قبل:\n> \\[\n> x=y+z\n> \\]\n> بعد',
+    '1. Text:\r\n   \\[\r\n   x=y+z\r\n   \\]\r\n   after',
+    '- Outer\n  - Inner:\n    \\[\n    x=y+z\n    \\]\n    after',
+    'Text \\(x\ny\\) end',
+  ];
+  for (const source of fixtures) {
+    const html = render(source);
+    assert.match(html, /class="katex"/, JSON.stringify(source));
+    assert.doesNotMatch(html, /data-markdown-fallback/, JSON.stringify(source));
+    for (let index = 0; index <= source.length; index++) {
+      const prefix = source.slice(0, index);
+      assert.doesNotThrow(() => render(prefix), `multiline prefix ${index} of ${JSON.stringify(source)}`);
+      assert.doesNotMatch(render(prefix), /data-markdown-fallback/, `tokenizer prefix ${index} must not fail internally`);
+    }
+  }
+});
+
+test('bounded parser fallback preserves original source literally without executing or reparsing it', () => {
+  const source = '<script>window.BAD = true</script>\n\\[x\\]\n' + 'x'.repeat(100001);
+  const root = parseMarkdown(source);
+  assert.equal(root.data?.debateLiteralFallback, true);
+  assert.equal(root.children[0].type, 'paragraph');
+  const html = render(source, { x: '**must not be rewritten**' });
+  assert.match(html, /data-markdown-fallback="literal"/);
+  assert.match(html, /Formatting could not be displayed; original text is shown\./);
+  assert.match(html, /&lt;script&gt;window.BAD = true&lt;\/script&gt;/);
+  assert.ok(html.includes(String.raw`\[x\]`));
+  assert.doesNotMatch(html, /<script>|class="katex"|must not be rewritten/);
+});
+
 test('HTML is literal text and unsafe links, remote images and TeX trust commands never execute', () => {
   const source = String.raw`<script>alert("x")</script>
 

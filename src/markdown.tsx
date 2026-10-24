@@ -1,6 +1,6 @@
 import type { ReactNode, ReactElement } from 'react';
 import type { Root, Nodes, Definition, Table } from 'mdast';
-import type { Construct, State, Token } from 'micromark-util-types';
+import type { Code, Construct, State, Token } from 'micromark-util-types';
 import { unified, type Processor } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -32,7 +32,7 @@ function replaceKnownLabels(text: string, labels?: Readonly<Record<string, strin
 // As a micromark text construct this never runs inside fenced/indented/inline code,
 // and normal Markdown escaping consumes \\ before it can become a math opener.
 declare module 'micromark-util-types' {
-  interface TokenTypeMap { debateLatexMath: 'debateLatexMath'; mathFlowFence: 'mathFlowFence' }
+  interface TokenTypeMap { debateLatexMath: 'debateLatexMath'; debateLatexMathData: 'debateLatexMathData'; mathFlowFence: 'mathFlowFence' }
   interface Token { debateMathClosed?: boolean }
 }
 declare module 'mdast' {
@@ -44,31 +44,45 @@ const latexConstruct: Construct = {
     let close: number;
     let token: Token;
     let previousLineEnding = false;
-    const finish: State = code => { effects.exit('debateLatexMath'); return ok(code); };
+    let dataOpen = false;
+    const consume = (code: Code) => {
+      if (!dataOpen) { effects.enter('debateLatexMathData'); dataOpen = true; }
+      effects.consume(code);
+    };
+    const closeData = () => { if (dataOpen) { effects.exit('debateLatexMathData'); dataOpen = false; } };
+    const finish: State = code => { closeData(); effects.exit('debateLatexMath'); return ok(code); };
     const body: State = code => {
       if (code === null) return finish(code); // Keep incomplete streaming math literal.
-      if (code === 92) { effects.consume(code); return afterSlash; }
+      if (code === 92) { consume(code); return afterSlash; }
       // Do not consume another paragraph when a delimiter is not closed.
       const lineEnding = code === -5 || code === -4 || code === -3;
       if (lineEnding && previousLineEnding) return finish(code);
       previousLineEnding = lineEnding || (previousLineEnding && (code === 32 || code === -1 || code === -2));
-      effects.consume(code);
+      if (lineEnding) {
+        // Inline constructs span linked text chunks, one per source line. These
+        // explicit child events delimit each source line for micromark's splice
+        // bookkeeping. A multiline void token corrupts linked chunk boundaries.
+        closeData();
+        effects.enter('lineEnding');
+        effects.consume(code);
+        effects.exit('lineEnding');
+      } else consume(code);
       return body;
     };
     const afterSlash: State = code => {
-      if (code === close) { token.debateMathClosed = true; effects.consume(code); return finish; }
-      if (code === 92) { effects.consume(code); return body; }
+      if (code === close) { token.debateMathClosed = true; consume(code); return finish; }
+      if (code === 92) { consume(code); return body; }
       return body(code);
     };
     const open: State = code => {
       if (code !== 40 && code !== 91) return nok(code);
       close = code === 40 ? 41 : 93;
-      effects.consume(code);
+      consume(code);
       return body;
     };
     return code => {
       token = effects.enter('debateLatexMath');
-      effects.consume(code);
+      consume(code);
       return open;
     };
   },
@@ -106,7 +120,18 @@ function remarkLatexDelimiters(this: Processor) {
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkLatexDelimiters).freeze();
 
 /** Parsing is stateless: every streaming snapshot may be incomplete or replaced. */
-export function parseMarkdown(source: string): Root { return parser.parse(source); }
+const MAX_MARKDOWN_CHARACTERS = 100000;
+type SafeRoot = Root & { data?: Root['data'] & { debateLiteralFallback?: boolean } };
+function literalMarkdown(source: string): SafeRoot {
+  return { type: 'root', data: { debateLiteralFallback: true }, children: [{ type: 'paragraph', children: [{ type: 'text', value: source }] }] };
+}
+export function parseMarkdown(source: string): SafeRoot {
+  // Parser faults are a display limitation, never permission to lose provider text
+  // or crash the panel. No raw parser message (which may echo content) is exposed.
+  if (source.length > MAX_MARKDOWN_CHARACTERS) return literalMarkdown(source);
+  try { return parser.parse(source); }
+  catch { return literalMarkdown(source); }
+}
 
 /** Links are inert unless their protocol is explicitly allowed; images never load. */
 export function safeMarkdownUrl(value: string): string | null {
@@ -154,6 +179,9 @@ export function createMarkdownRenderer(React: typeof import('react')) {
   const h = React.createElement;
   function Markdown({ children: source, className = '', labels }: MarkdownProps): ReactElement {
     const root = parseMarkdown(source);
+    if (root.data?.debateLiteralFallback) return h('div', { className: `mdb-markdown${className ? ` ${className}` : ''}`, dir: 'auto', 'data-markdown-fallback': 'literal' },
+      h('small', { role: 'status', 'data-markdown-warning': true }, 'Formatting could not be displayed; original text is shown.'),
+      h('div', { dir: 'auto', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, source));
     const definitions = new Map<string, Definition>();
     const queue: Nodes[] = [root];
     while (queue.length) {

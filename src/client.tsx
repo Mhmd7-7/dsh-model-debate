@@ -3,6 +3,7 @@ import type { DebateSession, DebateMessage, EncodedImage, ImagePolicy, ImageRef,
 import { settingsSchema, schedulingWarnings } from './state.js';
 import { readableText, participantLabels } from './content.js';
 import { createMarkdownRenderer, markdownStyleText } from './markdown.js';
+import { requestOperation, ClientRequestError } from './client-request.js';
 import { en, ar, namespace } from './i18n.js';
 // @ts-expect-error esbuild loads CSS as an owned inline text resource.
 import styleText from './client.css';
@@ -73,6 +74,12 @@ window.__ModuleLoader__.load({
         const t = ctx.locale.bind(namespace);
         const listeners = new Set<() => void>();
         const controllers = new Set<AbortController>();
+        // The panel unmounts when switching to Chat. Keep the admission lock outside
+        // App so a remount cannot submit another mutation while one is in flight.
+        let operationBusy = false;
+        const operationListeners = new Set<() => void>();
+        const subscribeOperation = (listener: () => void) => { operationListeners.add(listener); return () => { operationListeners.delete(listener); }; };
+        const setOperationBusy = (busy: boolean) => { operationBusy = busy; operationListeners.forEach(listener => listener()); };
         let view: ViewState = { snapshot: null, error: null, loading: true };
         let alive = true;
         let polling: ReturnType<typeof setInterval> | undefined;
@@ -165,10 +172,7 @@ window.__ModuleLoader__.load({
           const controller = new AbortController();
           controllers.add(controller);
           try {
-            const response = await fetch(new URL('api/model-debate', document.baseURI), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...fields }), signal: controller.signal });
-            const body = await response.json() as { ok: boolean; value?: T; error?: string };
-            if (!response.ok || !body.ok) throw new Error(body.error || `${t('Request failed')} (${response.status})`);
-            return body.value as T;
+            return await requestOperation<T>({ baseUrl: document.baseURI, action, fields, signal: controller.signal });
           } finally { controllers.delete(controller); }
         }
         async function refresh(fresh = false): Promise<void> {
@@ -184,7 +188,7 @@ window.__ModuleLoader__.load({
               if (running && !polling) polling = setInterval(() => { void refresh(); }, 750);
               if (!running && polling) { clearInterval(polling); polling = undefined; }
             } catch (error) {
-              if (alive && !(error instanceof DOMException && error.name === 'AbortError')) publish({ ...view, loading: false, error: error instanceof Error ? error.message : t('Request failed') });
+              if (alive && !(error instanceof ClientRequestError && error.code === 'ABORTED')) publish({ ...view, loading: false, error: error instanceof Error ? error.message : t('Request failed') });
             } finally { flight = null; }
           })();
           await flight;
@@ -192,7 +196,7 @@ window.__ModuleLoader__.load({
         const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
         ctx.effect(() => {
           void refresh();
-          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; followUpDrafts.clear(); followUpImages.clear(); followUpPending.clear(); followUpListeners.clear(); listeners.clear(); };
+          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; followUpDrafts.clear(); followUpImages.clear(); followUpPending.clear(); followUpListeners.clear(); operationListeners.clear(); listeners.clear(); };
         });
         function useLocale() { return useSyncExternalStore(fn => ctx.locale.subscribe(fn), () => ctx.locale.getSnapshot(), () => ctx.locale.getSnapshot()); }
         function Icon({ name = 'debate', size = 18 }: { name?: string; size?: number }) {
@@ -420,7 +424,7 @@ window.__ModuleLoader__.load({
           const imagePolicy = effectiveImagePolicy(snapshot?.imagePolicy);
           useEffect(() => { settingsDraft = draft; }, [draft]);
           useEffect(() => { composeDraft = question; }, [question]);
-          const [busy, setBusy] = useState(false);
+          const busy = useSyncExternalStore(subscribeOperation, () => operationBusy, () => false);
           const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
           const [dialog, setDialog] = useState<DialogState>(null);
           const [settingsOpen, setSettingsOpen] = useState(false);
@@ -462,8 +466,8 @@ window.__ModuleLoader__.load({
           const warnings = useMemo(() => settings ? schedulingWarnings(settings) : [], [settings]);
           const notify = (text: string) => setNotice({ text });
           async function act(action: string, fields: Record<string, unknown> = {}): Promise<any> {
-            if (busy) return null;
-            setBusy(true); setNotice(null);
+            if (operationBusy) return null;
+            setOperationBusy(true); setNotice(null);
             try {
               const result = await request<any>(action, fields);
               if (action === 'start' && result?.id) publishImageDraft({ images: [], reading: false, error: null });
@@ -473,7 +477,7 @@ window.__ModuleLoader__.load({
               if (action !== 'export') await refresh(true);
               return result === undefined ? true : result;
             } catch (error) { if (alive) setNotice({ text: error instanceof Error ? error.message : t('Request failed'), error: true }); return null; }
-            finally { if (alive) setBusy(false); }
+            finally { if (alive) setOperationBusy(false); }
           }
           const saveSettings = async () => {
             const parsed = settingsSchema.safeParse(settings);
@@ -481,7 +485,7 @@ window.__ModuleLoader__.load({
             if (!parsed.success) { setSettingsOpen(true); return; }
             if (await act('settings', { settings: parsed.data })) notify(t('Settings saved'));
           };
-          const newDebate = async () => { const result = await act('select', { id: null }); if (result) { setHistoryOpen(false); setAttempted(false); composerRef.current?.focus(); } };
+          const newDebate = async () => { const result = await act('select', { id: null }); if (result) { setHistoryOpen(false); setSettingsOpen(false); setAttempted(false); composerRef.current?.focus(); } };
           const start = async () => {
             setAttempted(true);
             if (busy || imageDraft.reading) return;
