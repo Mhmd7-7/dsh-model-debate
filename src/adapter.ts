@@ -7,7 +7,7 @@ export interface PreparedConfig { provider: string; model: string; maxTokens?: n
 export interface RetryPolicy { maxRetries?: number; retryableCodes?: readonly string[]; initialDelayMs?: number; maxDelayMs?: number; }
 export interface ModelAdapter {
   catalog(): Promise<{ models: ModelInfo[]; diagnostics: string[]; localOnly: boolean }>;
-  call(input: { participant: Participant; correlationId?: string; system: string; prompt: string; images?: readonly ImageRef[]; imageGroups?: readonly { text: string; images: readonly ImageRef[] }[]; signal: AbortSignal; maxTokens: number; onText: (text: string) => void; onPrepared?: (config: PreparedConfig) => Promise<void>; onDiagnostics?: (diagnostics: RequestDiagnostics) => void | Promise<void> }): Promise<{ text: string; incomplete: boolean; usage?: Usage; diagnostics?: RequestDiagnostics }>;
+  call(input: { participant: Participant; correlationId?: string; system: string; prompt: string; enforceContextBudget?: boolean; images?: readonly ImageRef[]; imageGroups?: readonly { text: string; images: readonly ImageRef[] }[]; signal: AbortSignal; maxTokens: number; onText: (text: string) => void; onPrepared?: (config: PreparedConfig) => Promise<void>; onDiagnostics?: (diagnostics: RequestDiagnostics) => void | Promise<void> }): Promise<{ text: string; incomplete: boolean; usage?: Usage; diagnostics?: RequestDiagnostics }>;
   retryPolicy(provider: string): RetryPolicy;
 }
 
@@ -223,6 +223,11 @@ export class DshAdapter implements ModelAdapter {
       const images = groups === undefined ? input.images ?? [] : groups.flatMap(group => group.images);
       if (groups !== undefined && input.images && (images.length !== input.images.length || images.some((image, index) => image.attachmentId !== input.images![index].attachmentId))) throw new ModelFailure('Image request groups do not match the validated ordered images.', 'INVALID_REQUEST');
       const advertised = await this.assertRoute(participant.provider, participant.model, signal);
+      if (input.enforceContextBudget) {
+        const metadata = await timed(child => this.ctx.llm.resolveModelInfo(participant.provider, participant.model, child), this.timeoutMs, signal);
+        const window = finiteNonnegative(metadata.context?.contextWindow) ?? 16384;
+        if (Buffer.byteLength(input.system + input.prompt, 'utf8') + input.maxTokens + 1024 > window) throw new ModelFailure('Document context exceeds the current model context window; reduce output/context or choose a larger-context model. No request was sent.', 'CONTEXT_LENGTH');
+      }
       if (images.length) {
         // This runs for every call/retry, never trusting a previously displayed catalog.
         if (imageSupport(advertised.inputModalities) === 'unsupported') assertImageSupport('unsupported');
@@ -233,6 +238,10 @@ export class DshAdapter implements ModelAdapter {
       if (prepared.config.provider !== participant.provider || prepared.config.model !== participant.model) throw new ModelFailure('DSH prepared a different model route; request refused.', 'UNAVAILABLE');
       // The one-shot handle owns the actual adapter generation; never permit DSH's text-only placeholder fallback.
       if (images.length && prepared.inputModalities !== undefined) assertImageSupport(imageSupport(prepared.inputModalities));
+      if (input.enforceContextBudget) {
+        const metadata = await timed(child => this.ctx.llm.resolveModelInfo(participant.provider, participant.model, child), this.timeoutMs, signal);
+        if (Buffer.byteLength(input.system + input.prompt, 'utf8') + (prepared.config.maxTokens ?? input.maxTokens) + 1024 > (finiteNonnegative(metadata.context?.contextWindow) ?? 16384)) throw new ModelFailure('Prepared document request exceeds the model context limit. No request was sent.', 'CONTEXT_LENGTH');
+      }
       aborted(signal);
       await interruptible(Promise.resolve(input.onPrepared?.({ provider: prepared.config.provider, model: prepared.config.model, ...(prepared.config.maxTokens === undefined ? {} : { maxTokens: prepared.config.maxTokens }), ...(prepared.config.reasoningEffort === undefined ? {} : { reasoningEffort: prepared.config.reasoningEffort }) })), signal);
       aborted(signal);

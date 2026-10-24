@@ -19,7 +19,7 @@ export interface RequestOperationOptions {
   timeoutMs?: number;
 }
 
-const readActions = new Set(['snapshot', 'get', 'export', 'image']);
+const readActions = new Set(['snapshot', 'get', 'export', 'image', 'process-files']);
 const maxPublicErrorChars = 1200;
 
 /** Performs exactly one request. T describes the value, not runtime value validation. */

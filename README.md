@@ -2,11 +2,11 @@
 
 A complete, self-contained DSH bundle for observing an evidence-first exchange between **2–20 distinct configured models**. Proposals, named objections, defenses, revisions, evidence limitations and final evaluation are retained with immutable attribution. This is not a collection of independent answers labeled a debate.
 
-**Compatibility checked:** DSH **0.2.1-rc.2**, Cordis **4.0.5**, DSH LLM/storage/Client packages **0.2.1-rc.2**, Node **26.3.0** (runtime requirement Node 22+). Versions are deliberately pinned: this plugin does not grant a compatibility exemption on another DSH version.
+**Compatibility checked:** DSH **0.2.1-rc.2**, Cordis **4.0.5**, DSH LLM/storage/Client packages **0.2.1-rc.2**, Node **26.3.0** (runtime requirement Node 22.3+). Versions are deliberately pinned: this plugin does not grant a compatibility exemption on another DSH version.
 
 ## Installation
 
-**Requires:** DeepSeek Harness **0.2.1-rc.2**, Node.js **22 or newer**, and at least **two configured model routes** for running a debate. Install this as a **DSH plugin**, not a standalone application.
+**Requires:** DeepSeek Harness **0.2.1-rc.2**, Node.js **22.3 or newer**, and at least **two configured model routes** for running a debate. Install this as a **DSH plugin**, not a standalone application.
 
 ### Option 1 — Install in the DSH GUI (recommended)
 
@@ -81,9 +81,45 @@ A result no longer closes the conversation. At the end of a saved debate, use **
 
 The agent operation is `model_debate` with `{"action":"followup","id":"…","message":"Here is some additional information…"}`. The GUI uses the same operation.
 
+## Document and file attachments
+
+Use **Attach files** beside either composer, or drag files onto it. Select several files, inspect each filename/size and **Processing / Ready / Failed** status, and remove unwanted files before sending. Messages may contain **files only**, text only, or both. Images continue through DSH's existing verified-vision pipeline. The interface supports Arabic/RTL and mixed-language filenames and content.
+
+**Supported documents:** PDF, DOCX, TXT, Markdown (`.md`, `.markdown`), CSV/TSV, and common UTF-8 source/config files: JS/TS/JSX/TSX, Python, Java, C/C++/C#, Go, Rust, Ruby, PHP, Swift, Kotlin, shell, SQL, CSS/HTML/XML, JSON/JSONL, YAML, TOML, INI, logs and R. Text accepts strict UTF-8 or BOM-marked UTF-16; other encodings must be converted. Files are reference material only: code, formulas, macros, external links and embedded commands are never executed.
+
+* PDF extraction retains **page numbers**. DOCX retains main-body headings, paragraphs and table rows; CSV retains column names and row references. Markdown retains headings, and source/plain text has line references.
+* Empty, corrupt, encrypted, unsupported and oversized inputs fail visibly and cannot be submitted as read. Scanned/image-only PDFs need OCR, which **is not integrated**; export a searchable PDF or supply extracted text. Mixed PDFs explicitly warn about pages without text. DOCX drawings and ancillary headers/footnotes/comments are not extracted; warnings identify these omissions.
+* Every participant and reviewer receives locally extracted text as supported **text input**, never an invented raw-document input. Images still require positively verified vision from every selected route; unsupported/unknown routes block image submission.
+* All original and continuation documents remain associated with the saved user turn and available across rounds, reviews, reloads and follow-ups. Large files use deterministic keyword-ranked **1,600-character chunks** against the question/latest follow-up, with a fair first chunk per file when it fits. Each request records filenames, page/section references, extraction warnings and counts of supplied/omitted chunks. This is extractive retrieval, not a fabricated summary or promise that every page was read. Ask a specific follow-up to retrieve other relevant passages.
+* Attachment input is bounded by the model's advertised context window, output reservation and a conservative UTF-8-byte input allowance; an unknown window uses a conservative **16,384-token fallback**. Dispatch checks refreshed metadata and the prepared output cap. A request that still cannot fit is rejected rather than silently losing the discussion.
+
+### Document host limits
+
+Configure these in DSH **Plugin Config**, not debate presets. Defaults (browser limits may only tighten them):
+
+```yaml
+documentMaxFiles: 4                  # configurable 1–20 per user message
+documentMaxFileBytes: 10485760        # 10 MiB; can be lowered
+documentMaxTotalBytes: 20971520       # 20 MiB documents per user message; can be lowered
+documentMaxConversationFiles: 40     # configurable 1–40 across original + follow-ups
+documentMaxExtractedChars: 200000     # configurable 1,000–200,000 per file
+```
+
+PDF/DOCX parsers run in resource-limited workers with a **15-second/file** deadline and a 128 MiB old-generation heap limit. Additional safety caps include 500 PDF pages, 2,048 ZIP entries, 32 MiB total advertised DOCX expansion, 8 MiB per XML part, XML nesting/node bounds, and 10,000 CSV rows/1,000 columns. Reaching an extraction cap produces an omission warning or an actionable rejection. JSON requests are capped at 58 MiB to allow independently bounded document/image batches; the DSH carrier can impose tighter limits.
+
+### Storage, removal and privacy
+
+Documents are processed **locally**, then extracted text, metadata and warnings are saved atomically in the existing DSH `model_debate` storage domain with the message. Raw PDF/DOCX/source bytes are **not retained** or made downloadable. Draft bytes live only in memory; preview processing creates no durable upload, so removed/abandoned documents leave no uploaded file to collect. Reload preserves submitted documents, not pending drafts. Delete removes a conversation's extracted documents and exact request records; re-runs own independent snapshots. Submitted messages are immutable: remove a file before sending, or delete the conversation afterward.
+
+Selected model providers receive the supplied extracted excerpts, subject to existing local-only/provider restrictions. Exact request logs and exports intentionally contain document text; ordinary diagnostic logs do not. For sensitive documents choose trusted local routes and protect DSH's saved storage/exports. Existing DSH image objects remain shared and follow DSH's retention behavior, not document deletion.
+
+The shared GUI/tool operation `process-files` validates/extracts raw `{name, data, mediaType?}` documents without saving; `start`/`followup` accept a `documents` array in that same canonical-base64 format and independently validate/extract before committing. Client-provided processed sections or paths are never accepted as uploaded documents. `snapshot.documentPolicy` supplies effective limits.
+
+See [attachment verification](docs/ATTACHMENTS.md) for the exact test scope and remaining integration limits.
+
 ## Image questions (version 1.1)
 
-Use **Add images**, paste an image into the composer, or drop image files onto it. PNG, JPEG, WebP and GIF are supported. Review/remove thumbnails before starting. The plugin accepts up to **4 images**, **10 MiB per image**, **20 MiB total**, further restricted by the current DSH attachment policy. A nonempty question is still required.
+Use **Add images**, paste an image into the composer, or drop image files onto it. PNG, JPEG, WebP and GIF are supported. Review/remove thumbnails before starting. The plugin accepts up to **4 images**, **10 MiB per image**, **20 MiB total**, further restricted by the current DSH attachment policy. The initial message may now contain images/files without text.
 
 Images are validated and normalized by DSH's durable attachment service. Each enabled participant **and the final reviewer** must have positively advertised image support; text-only and unknown-capability models are blocked rather than receiving a text placeholder. Choose image-capable models yourself—selection is never silently changed. Every turn, including final review, receives the same ordered original normalized images. Text inside an image is untrusted input, not permission to execute actions.
 
@@ -159,7 +195,7 @@ Browser/tool settings cannot relax these limits. Effective restrictions are capt
 
 ## Persistence, safety and architecture
 
-Source modules separate integration (`index`), model adapter (`adapter`), scheduling (`scheduler`), orchestration (`engine`), validation (`state`), content/export (`content`), storage (`persistence`), durable image admission (`images`) and UI (`client`, `client.css`, `i18n`). Build output contains a Host ESM entry and the native DSH lazy Client factory.
+Source modules additionally isolate document schemas (`document-state`), local extraction (`documents`) and bounded retrieval (`document-context`). Source modules separate integration (`index`), model adapter (`adapter`), scheduling (`scheduler`), orchestration (`engine`), validation (`state`), content/export (`content`), storage (`persistence`), durable image admission (`images`) and UI (`client`, `client.css`, `i18n`). Build output contains a Host ESM entry and the native DSH lazy Client factory.
 
 DSH `storageDomain` owns the `model_debate` domain, version 1. Settings/presets and complete session snapshots are validated and durably written. Model-visible exact prepared requests are stored before dispatch. Reloaded unfinished runs become **interrupted**; no fake execution or automatic continuation is shown. Failed storage writes do not fake a committed cache. Schema/version errors fail visibly rather than delete history.
 
@@ -185,7 +221,7 @@ npm pack --dry-run --json
 
 After `npm run build`, run `npm run test:browser` (requires Python Playwright and installed Chrome). Unlike source-only fixtures, this loads **the actual `dist/client.js`** inside a fixed-height, narrow DSH-like slot. It checks multiline `\\[...\\]` math (including a previously confirmed whole-panel parser crash), English/Arabic, real container sizing, Settings/History/New navigation, retained drafts, and mutation admission across Chat/Debate remounts. Provider execution stays disabled. Optional local saved-snapshot playback is supported by `node scripts/check-client-browser.mjs --saved <local-snapshot.json>`; keep private snapshots outside tracked files.
 
-If an answer's formatting cannot be parsed, the panel shows the original text with a warning rather than blanking the whole UI. Browser requests have a 30-second deadline covering fetch and JSON decoding; uncertain timed-out mutations are not automatically retried.
+If an answer's formatting cannot be parsed, the panel shows the original text with a warning rather than blanking the whole UI. Browser requests normally have a 30-second deadline covering fetch and JSON decoding; document-bearing start/follow-up requests add a bounded 15 seconds per file for backend re-extraction. Uncertain timed-out mutations are not automatically retried.
 
 To also run opt-in tests against this machine's **actual installed DSH/Cordis** runtime:
 

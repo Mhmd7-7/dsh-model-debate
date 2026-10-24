@@ -7,6 +7,9 @@ import { exportSession, hasReviewSections, makePrompt, publish, updateIssues } f
 import { Cancelled, RequestGate, realClock, sleep, type Clock } from './scheduler.js';
 import { noImages, validateImageModels, ImageInputError, type ImageGateway } from './images.js';
 import { conversationImages, conversationImageGroups } from './conversation-images.js';
+import { Documents, DocumentInputError } from './documents.js';
+import { encodedDocumentSchema, type EncodedDocument, type DocumentAttachment, type DocumentPolicy } from './document-state.js';
+import { conversationDocuments } from './document-context.js';
 /** Reasoning tokens count against many providers' output limit, including DeepSeek. */
 const REASONING_OUTPUT_RESERVE: Record<string, number> = { off: 0, none: 0, disabled: 0, light: 2048, low: 2048, balanced: 4096, medium: 4096, high: 8192, xhigh: 12288, max: 16384 };
 function automaticOutputTokens(settings: Settings, participant: Participant, model: ModelInfo | undefined): number {
@@ -31,8 +34,8 @@ function incompleteReason(settings: Settings, text: string, review: boolean, has
 
 export interface RepositoryLike { list(): DebateSession[]; get(id: string): DebateSession | undefined; save(s: DebateSession): Promise<void>; remove(id: string): Promise<void>; getPreferences(): Preferences | undefined; savePreferences(p: Preferences): Promise<void>; recover(): Promise<void>; }
 interface Running { session: DebateSession; abort: AbortController; gate: RequestGate; done: Promise<void>; reservedTokens: number; saveChain: Promise<void>; }
-interface Options { providerLimits?: Record<string, number>; providerSpacingMs?: Record<string, number>; maxConcurrentRuns?: number; clock?: Clock; images?: ImageGateway; }
-const actionSchema = z.object({ action: z.enum(['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image', 'followup']), message: z.string().max(30000).optional(), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), followUpId: z.string().max(100).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().min(1).max(30000).optional(), settings: settingsSchema.optional(), name: z.string().trim().min(1).max(100).optional(), title: z.string().trim().min(1).max(160).optional(), format: z.enum(['json', 'markdown']).optional() }).strict();
+interface Options { providerLimits?: Record<string, number>; providerSpacingMs?: Record<string, number>; maxConcurrentRuns?: number; clock?: Clock; images?: ImageGateway; documentLimits?: Partial<DocumentPolicy>; }
+const actionSchema = z.object({ action: z.enum(['snapshot', 'get', 'settings', 'start', 'stop', 'review', 'rename', 'delete', 'select', 'rerun', 'preset-save', 'preset-delete', 'preset-apply', 'export', 'image', 'followup', 'process-files']), documents: z.array(encodedDocumentSchema).max(20).optional(), message: z.string().max(30000).optional(), images: z.array(encodedImageSchema).max(4).optional(), imageIndex: z.number().int().min(0).max(19).optional(), followUpId: z.string().max(100).optional(), id: z.string().max(100).nullable().optional(), question: z.string().trim().max(30000).optional(), settings: settingsSchema.optional(), name: z.string().trim().min(1).max(100).optional(), title: z.string().trim().min(1).max(160).optional(), format: z.enum(['json', 'markdown']).optional() }).strict();
 const ACTIVE: TaskStatus[] = ['queued', 'waiting for cooldown', 'responding'];
 const TRANSIENT = ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'];
 
@@ -47,7 +50,10 @@ export class DebateService {
   private clock: Clock;
   private mutation: Promise<unknown> = Promise.resolve();
   private images: ImageGateway;
-  constructor(private adapter: ModelAdapter, private repository: RepositoryLike | Repository, private options: Options = {}) { this.clock = options.clock ?? realClock; this.images = options.images ?? noImages; }
+  private documents: Documents;
+  private processingFiles = 0;
+  private fileQueue: Promise<unknown> = Promise.resolve();
+  constructor(private adapter: ModelAdapter, private repository: RepositoryLike | Repository, private options: Options = {}) { this.clock = options.clock ?? realClock; this.images = options.images ?? noImages; this.documents = new Documents(options.documentLimits); }
   async initialize(): Promise<void> {
     await this.repository.recover(); await this.refreshCatalog();
     this.preferences = this.repository.getPreferences() ?? { settings: defaults(this.models), presets: starterPresets(defaults(this.models)), activeId: null };
@@ -59,6 +65,8 @@ export class DebateService {
     const q = actionSchema.parse(input);
     if (q.message !== undefined && q.action !== 'followup') throw new FollowUpError('New conversation messages are accepted only with the followup action.');
     if (q.images?.length && q.action !== 'start' && q.action !== 'followup') throw new ImageInputError('Image uploads are accepted only when starting or continuing a debate.');
+    if (q.documents?.length && !['start', 'followup', 'process-files'].includes(q.action)) throw new DocumentInputError('Files are accepted only when processing, starting or continuing a debate.');
+    if (q.action === 'process-files') return this.extractDocuments(q.documents ?? []);
     if (q.action === 'snapshot') { if (!this.runs.size) await this.refreshCatalog(); return this.snapshot(); }
     if (q.action === 'get') return this.get(requireField(q.id, 'id'));
     if (q.action === 'export') return exportSession(this.get(requireField(q.id, 'id')), requireField(q.format, 'format'));
@@ -67,11 +75,11 @@ export class DebateService {
     const result = this.mutation.catch(() => {}).then(async () => {
       switch (q.action) {
         case 'settings': this.preferences.settings = settingsSchema.parse(requireField(q.settings, 'settings')); await this.savePreferences(); return { saved: true, applies: 'future runs' };
-        case 'start': return this.start(requireField(q.question, 'question'), q.settings ?? this.preferences.settings, q.images);
-        case 'rerun': { const s = this.get(requireField(q.id, 'id')); return this.start(s.question, s.settings, undefined, s.images, s.followUps); }
+        case 'start': return this.start(q.question ?? '', q.settings ?? this.preferences.settings, q.images, [], [], q.documents);
+        case 'rerun': { const s = this.get(requireField(q.id, 'id')); return this.start(s.question, s.settings, undefined, s.images, s.followUps, [], s.documents ?? []); }
         case 'followup': {
           if (q.settings !== undefined) throw new FollowUpError('Follow-up uses the saved participants and settings. Start a new debate to change them.');
-          return this.followUp(requireField(q.id, 'id'), q.message ?? '', q.images ?? []);
+          return this.followUp(requireField(q.id, 'id'), q.message ?? '', q.images ?? [], q.documents ?? []);
         }
         case 'stop': { const run = this.runs.get(requireField(q.id, 'id')); if (!run) throw new Error('This discussion is not executing.'); await this.stop(run, 'stopped', 'User pressed Stop. No review was started.'); return { stopped: true }; }
         case 'review': return this.reviewAvailable(requireField(q.id, 'id'));
@@ -93,7 +101,7 @@ export class DebateService {
   }
   private snapshot(): Snapshot {
     const sessions = this.repository.list().map(s => this.runs.has(s.id) ? structuredClone(this.runs.get(s.id)!.session) : s);
-    return { imagePolicy: this.images.policy(), models: structuredClone(this.models), diagnostics: [...this.diagnostics], localOnly: this.localOnly, settings: structuredClone(this.preferences.settings), presets: structuredClone(this.preferences.presets), sessions: sessions.sort((a, b) => b.createdAt - a.createdAt), activeId: this.preferences.activeId };
+    return { documentPolicy: this.documents.policy(), imagePolicy: this.images.policy(), models: structuredClone(this.models), diagnostics: [...this.diagnostics], localOnly: this.localOnly, settings: structuredClone(this.preferences.settings), presets: structuredClone(this.preferences.presets), sessions: sessions.sort((a, b) => b.createdAt - a.createdAt), activeId: this.preferences.activeId };
   }
   private get(id: string): DebateSession { const s = this.runs.get(id)?.session ?? this.repository.get(id); if (!s) throw new Error('Debate session not found.'); return structuredClone(s); }
   private effectiveSettings(settings: Settings): Settings {
@@ -103,21 +111,35 @@ export class DebateService {
     return s;
   }
   private ensureCapacity(): void { if (this.runs.size >= (this.options.maxConcurrentRuns ?? 1)) throw new Error('Another debate is active. Stop it or wait before starting another.'); }
-  private async start(question: string, settings: Settings, uploads: EncodedImage[] = [], saved: ImageRef[] = [], priorFollowUps: FollowUp[] = []): Promise<{ id: string }> {
+  private async extractDocuments(uploads: readonly EncodedDocument[]): Promise<DocumentAttachment[]> {
+    if (!uploads.length) return [];
+    if (this.processingFiles >= 20) throw new DocumentInputError('The document processing queue is full. Wait and choose the file again.');
+    this.processingFiles++;
+    const result = this.fileQueue.catch(() => {}).then(() => this.documents.extract(uploads));
+    this.fileQueue = result;
+    try { return await result; } finally { this.processingFiles--; }
+  }
+  private checkDocumentCount(documents: readonly DocumentAttachment[]): void {
+    if (documents.length > this.documents.policy().maxConversationFiles) throw new DocumentInputError(`This conversation exceeds the ${this.documents.policy().maxConversationFiles} file limit. Start a new debate or remove pending files.`);
+  }
+  private async start(question: string, settings: Settings, uploads: EncodedImage[] = [], saved: ImageRef[] = [], priorFollowUps: FollowUp[] = [], fileUploads: EncodedDocument[] = [], savedDocuments: DocumentAttachment[] = []): Promise<{ id: string }> {
+    if (!question.trim() && !uploads.length && !saved.length && !fileUploads.length && !savedDocuments.length) throw new FollowUpError('Add a question or at least one attachment to start a debate.');
     this.ensureCapacity(); await this.refreshCatalog();
     const effective = validateRun(this.effectiveSettings(settings), this.models);
     const retained = conversationImages({ images: saved, followUps: priorFollowUps });
     validateImageModels(effective, this.models, uploads.length || retained.length);
+    const documents = savedDocuments.length ? structuredClone(savedDocuments) : await this.extractDocuments(fileUploads);
+    this.checkDocumentCount([...documents, ...priorFollowUps.flatMap(turn => turn.documents ?? [])]);
     const images = saved.length ? structuredClone(saved) : await this.images.admit(uploads);
     if (retained.length) await this.images.verify(retained);
     const now = this.clock.now();
-    const s: DebateSession = { schemaVersion: 1, id: randomUUID(), title: question.slice(0, 100), question, images, createdAt: now, updatedAt: now, status: 'running', settings: effective, messages: [], tasks: [], issues: [], followUps: priorFollowUps.map(turn => ({ ...turn, id: randomUUID(), startRound: 1, budgetStart: 0 })), reviews: [], requests: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, usageUnavailable: false, budgetUsed: 0, budgetEstimated: false, round: 0, stage: 'Queued', stageDeadline: now + effective.roundMs, deadline: now + effective.overallMs, startedAt: now, final: null, reviewError: null, stopReason: null, compression: [] };
+    const s: DebateSession = { schemaVersion: 1, id: randomUUID(), title: question.slice(0, 100) || documents[0]?.name || images[0]?.name || 'Attached files', question, documents, images, createdAt: now, updatedAt: now, status: 'running', settings: effective, messages: [], tasks: [], issues: [], followUps: priorFollowUps.map(turn => ({ ...turn, id: randomUUID(), startRound: 1, budgetStart: 0 })), reviews: [], requests: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, usageUnavailable: false, budgetUsed: 0, budgetEstimated: false, round: 0, stage: 'Queued', stageDeadline: now + effective.roundMs, deadline: now + effective.overallMs, startedAt: now, final: null, reviewError: null, stopReason: null, compression: [] };
     await this.repository.save(s); this.preferences.activeId = s.id; this.preferences.settings = structuredClone(settings); await this.savePreferences();
     const run = this.createRun(s); run.done = this.execute(run).finally(() => { run.gate.dispose(); this.runs.delete(s.id); });
     return { id: s.id };
   }
-  private async followUp(id: string, message: string, uploads: EncodedImage[]): Promise<{ id: string; followUpId: string }> {
-    if (!message.trim() && !uploads.length) throw new FollowUpError('Add a message or at least one image to continue this debate.');
+  private async followUp(id: string, message: string, uploads: EncodedImage[], fileUploads: EncodedDocument[]): Promise<{ id: string; followUpId: string }> {
+    if (!message.trim() && !uploads.length && !fileUploads.length) throw new FollowUpError('Add a message or at least one attachment to continue this debate.');
     this.ensureCapacity(); const s = this.get(id);
     if (s.status === 'running' || s.status === 'reviewing') throw new FollowUpError('Wait for this discussion to finish, or stop it before sending a follow-up.');
     if (s.followUps.length >= 30) throw new FollowUpError('This debate has reached the limit of 30 follow-up messages. Start a new debate to continue.');
@@ -126,12 +148,14 @@ export class DebateService {
     const retainedImages = conversationImages(s);
     validateImageModels(s.settings, this.models, uploads.length || retainedImages.length);
     await this.images.verify(retainedImages);
+    const newDocuments = await this.extractDocuments(fileUploads);
+    this.checkDocumentCount([...conversationDocuments(s), ...newDocuments]);
     const newImages = await this.images.admit(uploads);
     const prospectiveImages = new Set([...retainedImages, ...newImages].map(image => image.attachmentId));
     if (prospectiveImages.size > 20) throw new ImageInputError('This conversation exceeds the limit of 20 distinct context images. Start a new debate; no image was silently omitted.');
     this.archiveFinal(s);
     const now = this.clock.now(), startRound = Math.max(s.round, this.cycleStart(s), ...s.messages.map(m => m.round), ...s.tasks.map(t => t.round)) + 1;
-    const turn: FollowUp = { id: randomUUID(), text: message.trim(), ...(newImages.length ? { images: newImages } : {}), timestamp: now, startRound, budgetStart: s.budgetUsed };
+    const turn: FollowUp = { id: randomUUID(), text: message.trim(), ...(newDocuments.length ? { documents: newDocuments } : {}), ...(newImages.length ? { images: newImages } : {}), timestamp: now, startRound, budgetStart: s.budgetUsed };
     s.followUps.push(turn); s.final = null; s.reviewError = null; s.stopReason = null; s.endedAt = undefined;
     s.status = 'running'; s.stage = 'Follow-up discussion'; s.deadline = now + s.settings.overallMs;
     s.stageDeadline = now + s.settings.roundMs; s.updatedAt = now;
@@ -245,13 +269,28 @@ export class DebateService {
     const s = run.session, settings = s.settings, images = conversationImages(s), imageGroups = conversationImageGroups(s);
     const task: Task = { id: randomUUID(), participantId: p.id, round: s.round, status: 'queued', attempt: 0, queuedAt: this.clock.now(), attempts: [] };
     s.tasks.push(task); await this.persist(run);
+    const model = this.models.find(model => model.provider === p.provider && model.model === p.model);
+    const hasDocuments = conversationDocuments(s).length > 0;
+    const contextWindow = model?.contextWindow ?? 16384;
+    const automaticMaxTokens = Math.min(automaticOutputTokens(settings, p, model), hasDocuments ? Math.max(64, Math.floor(contextWindow / 4)) : 32768);
     let content: ReturnType<typeof makePrompt>;
-    try { content = makePrompt(s, p, snapshot, s.stage, targets, review); }
+    try {
+      let documentBudget = Math.min(24000, Math.floor(settings.contextChars / 2));
+      content = makePrompt(s, p, snapshot, s.stage, targets, review, documentBudget);
+      if (hasDocuments) {
+        const output = p.options.maxTokens ?? automaticMaxTokens;
+        const inputLimit = contextWindow - output - 1024;
+        while (Buffer.byteLength(content.system + content.prompt, 'utf8') > inputLimit && documentBudget > 0) {
+          documentBudget = Math.max(0, documentBudget - Math.max(512, Buffer.byteLength(content.system + content.prompt, 'utf8') - inputLimit));
+          content = makePrompt(s, p, snapshot, s.stage, targets, review, documentBudget);
+        }
+        if (Buffer.byteLength(content.system + content.prompt, 'utf8') > inputLimit) throw new DocumentInputError('The preserved discussion and attachment manifest exceed this model context limit (conservative UTF-8 input/output reservation). Reduce rounds/output tokens or choose a larger-context model; no request was sent.');
+      }
+    }
     catch (e) { task.status = 'failed'; task.error = e instanceof Error ? e.message : 'Context construction failed'; task.endedAt = this.clock.now(); await this.persist(run); return false; }
     if (content.context.compressed) s.compression.push({ timestamp: this.clock.now(), before: content.context.before, after: content.context.after, messageIds: content.context.ids });
     const policy = this.adapter.retryPolicy(p.provider), attempts = Math.min(settings.retries, policy.maxRetries ?? settings.retries) + 1;
-    const automaticMaxTokens = automaticOutputTokens(settings, p, this.models.find(model => model.provider === p.provider && model.model === p.model));
-    let readyAt = 0;
+        let readyAt = 0;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       let release: (() => void) | undefined, reservation = 0, accepted = false;
       const controller = new AbortController(), abort = () => controller.abort();
@@ -278,7 +317,7 @@ export class DebateService {
         const onAbort = () => rejectCancellation(run.abort.signal.aborted ? new Cancelled('STOPPED') : this.clock.now() >= s.stageDeadline ? new Cancelled('DEADLINE') : Object.assign(new Error('Model request timed out.'), { code: 'TIMEOUT' }));
         controller.signal.addEventListener('abort', onAbort, { once: true });
         timer = this.clock.setTimeout(() => controller.abort(), deadline - this.clock.now());
-        const result = await Promise.race([this.adapter.call({ participant: p, system: content.system, prompt: content.prompt, images, imageGroups, correlationId: attemptState.correlationId, signal: controller.signal, maxTokens,
+        const result = await Promise.race([this.adapter.call({ participant: p, system: content.system, prompt: content.prompt, enforceContextBudget: hasDocuments, images, imageGroups, correlationId: attemptState.correlationId, signal: controller.signal, maxTokens,
           onDiagnostics: async diagnostics => { if (isCurrent()) { attemptState.diagnostics = diagnostics; await this.persist(run); } },
           onPrepared: async config => { if (!isCurrent()) throw new Cancelled(); s.requests.push({ taskId: task.id, attempt, timestamp: this.clock.now(), system: content.system, prompt: content.prompt, config, contextIds: content.context.ids, images: structuredClone(images), compressed: content.context.compressed }); await this.persist(run); accepted = true; },
           onText: text => { if (isCurrent() && this.clock.now() < deadline) task.partial = text.slice(0, 100000); },

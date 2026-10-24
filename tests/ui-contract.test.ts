@@ -26,8 +26,8 @@ test('image composer uses bounded atomic batches and sends canonical inline imag
   assert.match(source, /reader\.readAsDataURL\(file\)/); assert.match(source, /reader\.result\.slice\(prefix\.length\)/);
   assert.match(source, /btoa\(decoded\) !== data/); assert.match(source, /checked\.bytes !== file\.size/);
   assert.match(source, /images: images\.images\.map\(image => image\.encoded\)/);
-  assert.match(source, /if \(busy \|\| imageDraft\.reading\) return/); assert.match(source, /disabled=\{busy \|\| images\.reading \|\| !!validation\.length/);
-  assert.match(source, /if \(action === 'start' && result\?\.id\) publishImageDraft\(\{ images: \[\]/);
+  assert.match(source, /if \(busy \|\| imageDraft\.reading \|\| documentsBlocked\(documentDraft\)\) return/); assert.match(source, /disabled=\{busy \|\| images\.reading \|\| documentsBlocked\(documents\) \|\| !!validation\.length/);
+  assert.match(source, /if \(action === 'start' && result\?\.id\) \{ publishImageDraft\(\{ images: \[\]/);
   assert.match(source, /imageReaders\.forEach\(reader => reader\.abort\(\)\)/);
   assert.ok(!source.includes("request('upload'")); assert.ok(!source.includes('revokeObjectURL(image.'));
 });
@@ -65,7 +65,7 @@ test('follow-up composer is same-session, supports attachments and retains draft
   assert.match(composer, /!event\.nativeEvent\.isComposing/); assert.match(composer, /event\.nativeEvent\.keyCode !== 229/);
   assert.match(composer, /event\.ctrlKey \|\| event\.metaKey/); assert.match(composer, /!event\.repeat/);
   assert.match(composer, /dir="auto"/); assert.match(composer, /t\(running \? 'Follow-up wait'/);
-  assert.match(composer, /<ImageComposer .*owner=\{session.id\}/); assert.match(composer, /images: attachments.images.map/); assert.ok(!composer.includes('settings:'));
+  assert.match(composer, /<AttachmentComposer .*owner=\{session.id\}/); assert.match(composer, /images: attachments.images.map/); assert.ok(!composer.includes('settings:'));
   assert.match(composer, /onPaste=/); assert.match(composer, /onDrop=/); assert.match(composer, /attachments.reading/);
   assert.match(source, /<FollowUpComposer session=\{s\}/);
   for (const key of ['Continue this debate', 'Follow-up wait', 'Follow-up resource hint', 'Follow-up image hint', 'Send follow-up', 'Follow-up message', 'Previous synthesis', 'You']) assert.ok(en[key] && ar[key], `Missing follow-up translation: ${key}`);
@@ -81,8 +81,37 @@ test('transcript interleaves attributed user follow-ups and archived reviews at 
   assert.match(transcript, /followUp\.startRound === round/); assert.match(transcript, /review\.afterRound === round/);
   assert.ok(transcript.indexOf('followUp.startRound === round') < transcript.indexOf('message.round === round'));
   assert.ok(transcript.indexOf('message.round === round') < transcript.indexOf('review.afterRound === round'));
-  assert.match(transcript, /t\('You'\)/); assert.match(transcript, /followUp\.text \|\| t\('Image-only follow-up'\)/);
+  assert.match(transcript, /t\('You'\)/); assert.match(transcript, /followUp\.text \|\| t\(followUp\.documents\?\.length \? 'Attachment-only follow-up' : 'Image-only follow-up'\)/);
   assert.match(transcript, /<Markdown labels=\{participantLabels\(s\)\}>\{review\.text\}<\/Markdown>/); assert.match(source, /<Markdown labels=\{participantLabels\(s\)\}>\{s\.final\.text\}<\/Markdown>/);
+});
+test('document attachments are processed before send and retained only as closure-owned raw drafts', async () => {
+  const source = await readFile(new URL('../src/client.tsx', import.meta.url), 'utf8');
+  assert.match(source, /import type \{ DocumentAttachment, DocumentPolicy, EncodedDocument \} from '.\/document-state.js'/);
+  assert.match(source, /const followUpDocuments = new Map<string, DocumentDraftState>\(\)/);
+  assert.match(source, /request<DocumentAttachment\[\]>\('process-files', \{ documents: \[encoded\] \}\)/);
+  const processing = source.slice(source.indexOf('let documentProcessingQueue:'), source.indexOf('function addAttachmentFiles('));
+  assert.match(processing, /documentProcessingQueue\.then\(processBatch\)/);
+  assert.match(processing, /for \(const \[index, file\] of files\.entries\(\)\)/);
+  assert.ok(!processing.includes('Promise.all'));
+  assert.ok(processing.indexOf('if (!retained()) continue') < processing.indexOf('await readDocumentFile(file)'));
+  assert.match(processing, /await readDocumentFile\(file\);\s+if \(!retained\(\)\) continue/);
+  assert.match(source, /documents: documents.documents.map\(file => file.encoded!\)/);
+  assert.match(source, /documents: files.documents.map\(file => file.encoded!\)/);
+  assert.ok(!/documents:.*map\(file => file.processed/.test(source));
+  assert.match(source, /const documents = files.filter\(file => !images.includes\(file\)\)/);
+  assert.match(source, /if \(images.length\) void addImageFiles\(images, imagePolicy, owner\)/);
+  assert.match(source, /if \(documents.length\) void addDocumentFiles\(documents, documentPolicy, owner\)/);
+  assert.match(source, /publishDocuments\(emptyDocumentDraft, result.id\)/);
+  assert.match(source, /<SavedDocuments documents=\{s.documents\}/);
+  assert.match(source, /<SavedDocuments documents=\{followUp.documents\} continuation/);
+  assert.match(source, /<Plain>\{section.text\}<\/Plain>/);
+  for (const key of ['Add attachments', 'Document ready', 'Document error', 'Processing document', 'Document privacy note', 'Document warnings']) assert.ok(en[key] && ar[key]);
+  assert.match(en['Document privacy note'], /not OCR-processed/);
+  assert.match(source, /deletedSessionDrafts\.add\(fields.id\)/);
+  assert.match(source, /followUpDrafts.delete\(fields.id\); followUpImages.delete\(fields.id\); followUpDocuments.delete\(fields.id\)/);
+  assert.match(source, /if \(!alive \|\| deletedSessionDrafts.has\(id\)\) return/);
+  assert.match(source, /t\('Document excerpt note'\)/);
+  assert.match(en['Document excerpt note'], /bounded excerpts/);
 });
 test('Client CSS uses inspected theme tokens rather than hardcoded UI colors', async () => {
   const css = await readFile(new URL('../src/client.css', import.meta.url), 'utf8');

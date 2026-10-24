@@ -53,6 +53,86 @@ with sync_playwright() as p:
         page.evaluate('window.__debateBrowser.mount()')
         page.locator('#mdb-question').wait_for()
         assert page.locator('#mdb-question').input_value() == 'Retained compose draft'
+        if not args.saved:
+            # Combined picker validates each raw document before submission, keeps
+            # drafts across failed sends/remount, and accepts attachment-only turns.
+            page.locator('#mdb-question').fill('')
+            page.evaluate('window.__debateBrowser.setRequestDelay(250)')
+            picker = page.locator('.mdb-composer input[type=file]').first
+            picker.set_input_files({'name': 'source.txt', 'mimeType': 'text/plain', 'buffer': b'<script>untrusted text</script> evidence'})
+            page.locator('.mdb-document-processing').wait_for()
+            assert page.locator('.mdb-composer button[type=submit]').is_disabled()
+            page.locator('.mdb-document-ready').wait_for()
+            page.evaluate('window.__debateBrowser.setRequestDelay(0); window.__debateBrowser.setFailSend(true)')
+            page.locator('.mdb-composer button[type=submit]').click()
+            page.wait_for_function('!document.querySelector(".mdb-composer button[type=submit]:disabled")')
+            assert page.locator('.mdb-document-ready').count() == 1
+            page.evaluate('window.__debateBrowser.unmount(); window.__debateBrowser.mount()')
+            page.locator('.mdb-document-ready').wait_for()
+            assert page.locator('#mdb-question').input_value() == ''
+            page.evaluate('window.__debateBrowser.setFailSend(false)')
+            page.locator('.mdb-composer button[type=submit]').click()
+            page.locator('.mdb-session-view .mdb-saved-document').wait_for()
+            raw_start = page.evaluate('window.__debateBrowser.requests.filter(r=>r.action==="start").at(-1)')
+            assert raw_start['question'] == ''
+            assert 'data' in raw_start['documents'][0] and 'sections' not in raw_start['documents'][0]
+            page.locator('.mdb-saved-document summary').first.click()
+            assert page.locator('.mdb-saved-document').first.inner_text().find('<script>untrusted text</script>') >= 0
+            assert page.locator('.mdb-saved-document script').count() == 0
+            follow_picker = page.locator('.mdb-followup-composer input[type=file]').first
+            follow_picker.set_input_files([{'name': 'bad.txt', 'mimeType': 'text/plain', 'buffer': b'reject this'}, {'name': 'next.txt', 'mimeType': 'text/plain', 'buffer': b'new evidence'}])
+            page.locator('.mdb-document-error').wait_for()
+            page.locator('.mdb-document-ready').wait_for()
+            assert page.locator('.mdb-followup-composer button[type=submit]').is_disabled()
+            page.locator('.mdb-document-error button').click()
+            page.evaluate('window.__debateBrowser.setFailSend(true)')
+            page.locator('.mdb-followup-composer button[type=submit]').click()
+            page.wait_for_function('!document.querySelector(".mdb-followup-composer button[type=submit]:disabled")')
+            page.evaluate('window.__debateBrowser.unmount(); window.__debateBrowser.mount()')
+            page.locator('.mdb-document-ready').wait_for()
+            page.evaluate('window.__debateBrowser.setFailSend(false)')
+            page.locator('.mdb-followup-composer button[type=submit]').click()
+            page.locator('.mdb-followup-message .mdb-saved-document').wait_for()
+            assert page.locator('.mdb-document-draft').count() == 0
+            raw_followup = page.evaluate('window.__debateBrowser.requests.filter(r=>r.action==="followup").at(-1)')
+            assert raw_followup['message'] == '' and 'data' in raw_followup['documents'][0] and 'sections' not in raw_followup['documents'][0]
+            page.locator('.mdb-new-debate').click()
+            page.locator('#mdb-question').wait_for()
+            assert page.locator('#mdb-question').input_value() == '' and page.locator('.mdb-document-draft').count() == 0
+            # Queue in the client before request timeouts start; removed queued
+            # files must never be read/processed, while every row appears at once.
+            page.evaluate('window.__debateBrowser.setRequestDelay(400)')
+            picker = page.locator('.mdb-composer input[type=file]').first
+            picker.set_input_files([{'name': name, 'mimeType': 'text/plain', 'buffer': b'queued evidence'} for name in ['queue-first.txt', 'queue-remove.txt', 'queue-last.txt']])
+            page.wait_for_function('window.__debateBrowser.requests.some(r=>r.action==="process-files" && r.documents[0].name==="queue-first.txt")')
+            assert page.locator('.mdb-document-draft').count() == 3
+            assert not page.evaluate('window.__debateBrowser.requests.some(r=>r.action==="process-files" && r.documents[0].name==="queue-last.txt")')
+            page.locator('.mdb-document-draft').filter(has_text='queue-remove.txt').locator('button').click()
+            page.wait_for_function('document.querySelectorAll(".mdb-document-ready").length===2')
+            queued_names = page.evaluate('window.__debateBrowser.requests.filter(r=>r.action==="process-files" && r.documents[0].name.startsWith("queue-")).map(r=>r.documents[0].name)')
+            assert queued_names == ['queue-first.txt', 'queue-last.txt']
+            page.locator('.mdb-document-draft button').first.click()
+            page.locator('.mdb-document-draft button').first.click()
+            page.evaluate('window.__debateBrowser.setRequestDelay(0)')
+            # Mixed drag/drop must not feed documents to the image validator.
+            page.locator('.mdb-composer').evaluate('''element => {
+              const transfer = new DataTransfer();
+              const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2gS8AAAAASUVORK5CYII='), c=>c.charCodeAt(0));
+              transfer.items.add(new File([bytes], 'pixel.png', {type:'image/png'}));
+              transfer.items.add(new File(['mixed evidence'], 'mixed.txt', {type:'text/plain'}));
+              element.dispatchEvent(new DragEvent('drop', {bubbles:true,dataTransfer:transfer}));
+            }''')
+            page.locator('.mdb-draft-image').wait_for()
+            page.locator('.mdb-document-ready').wait_for()
+            assert page.locator('.mdb-document-draft').count() == 1
+            page.locator('.mdb-document-draft button').click()
+            page.locator('.mdb-composer button[type=submit]').click()
+            page.locator('.mdb-session-view').wait_for()
+            page.wait_for_function('!document.querySelector(".mdb-new-debate:disabled")')
+            image_only = page.evaluate('window.__debateBrowser.requests.filter(r=>r.action==="start").at(-1)')
+            assert image_only['question'] == '' and len(image_only['images']) == 1
+            page.locator('.mdb-new-debate').click()
+            page.locator('#mdb-question').wait_for()
         # Constrained DSH center on a desktop-sized window must use panel width.
         page.set_viewport_size({'width':1024,'height':900}) # actual panel width744
         page.locator('.mdb-mobile-tabs').wait_for(state='visible')
@@ -74,7 +154,7 @@ with sync_playwright() as p:
         assert not errors, errors
         dimensions = page.locator('.mdb-root').evaluate('(e)=>({client:e.clientHeight,scroll:e.scrollHeight,width:e.clientWidth,scrollWidth:e.scrollWidth})')
         assert dimensions['scrollWidth'] <= dimensions['width'] + 1
-        results.append({'locale':locale,'sessionsRendered':count,'pageErrors':errors,'dimensions':dimensions,'checks':['all saved reviews/transcripts','exact production bundle','StrictMode mount','Arabic/English','bounded host slot','narrow desktop panel','settings/history/new navigation','draft across remount','pending mutation lock across remount']})
+        results.append({'locale':locale,'sessionsRendered':count,'pageErrors':errors,'dimensions':dimensions,'checks':['all saved reviews/transcripts','exact production bundle','StrictMode mount','Arabic/English','bounded host slot','narrow desktop panel','settings/history/new navigation','draft across remount','pending mutation lock across remount','document processing/ready/error/remove','attachment-only initial and continuation','raw-only submission','failed-send attachment drafts across remount','safe extracted text/warnings','mixed image/document drop','image-only initial']})
         page.close()
     browser.close()
 (out / 'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')

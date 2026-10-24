@@ -13,10 +13,12 @@ const now = Date.now();
 // This synthetic multiline backslash-delimited equation crashed the 1.3.1
 // micromark extension and blanked the whole panel, even inside closed details.
 const regression = 'Text:\n\\[\nx^2 = 4\n\\]\n\n- العربية **English**\n- Next item';
-const session = { schemaVersion: 1, id: 'browser-regression', title: 'Synthetic multiline math regression', question: 'Inspect the equation.', images: [], createdAt: now, updatedAt: now, startedAt: now, endedAt: now, status: 'completed', settings, messages: [], tasks: [], issues: [], followUps: [], reviews: [], requests: [], usage: { inputTokens: 1, outputTokens: 1 }, usageUnavailable: false, budgetUsed: 2, budgetEstimated: false, round: 2, stage: 'Final review', stageDeadline: now, deadline: now, final: { text: regression, provider: 'fixture', model: 'model-1', timestamp: now, incomplete: false }, reviewError: null, stopReason: null, compression: [] };
+const session = { schemaVersion: 1, id: 'browser-regression', title: 'Synthetic multiline math regression', question: 'Inspect the equation.', images: [], documents: [], createdAt: now, updatedAt: now, startedAt: now, endedAt: now, status: 'completed', settings, messages: [], tasks: [], issues: [], followUps: [], reviews: [], requests: [], usage: { inputTokens: 1, outputTokens: 1 }, usageUnavailable: false, budgetUsed: 2, budgetEstimated: false, round: 2, stage: 'Final review', stageDeadline: now, deadline: now, final: { text: regression, provider: 'fixture', model: 'model-1', timestamp: now, incomplete: false }, reviewError: null, stopReason: null, compression: [] };
 const snapshot = config.snapshot ?? { settings, models: [model(1), model(2)], presets: [], sessions: [session], activeId: session.id, diagnostics: [], localOnly: false, imagePolicy: { available: true, maxImages: 4, maxImageBytes: 10485760, maxTotalBytes: 20971520, mediaTypes: ['image/png','image/jpeg','image/webp','image/gif'] } };
+snapshot.documentPolicy ??= { maxFiles: 4, maxFileBytes: 10485760, maxTotalBytes: 20971520, maxConversationFiles: 40, maxExtractedChars: 200000, extensions: ['.txt', '.pdf', '.docx'] };
 let requestDelay = config.requestDelayMs ?? 0;
-const fixture = w.__debateBrowser = { snapshot, requests: [] as any[], errors: [] as string[], disposers: [] as (() => unknown)[], mounted: true, setRequestDelay: (ms: number) => { requestDelay = ms; }, refresh: () => {}, mount: () => {}, unmount: () => {} };
+let failSend = false;
+const fixture = w.__debateBrowser = { snapshot, requests: [] as any[], errors: [] as string[], disposers: [] as (() => unknown)[], mounted: true, setFailSend: (value: boolean) => { failSend = value; }, setRequestDelay: (ms: number) => { requestDelay = ms; }, refresh: () => {}, mount: () => {}, unmount: () => {} };
 let locale = { active: config.locale ?? 'en', locales: [{ id: 'en', label: 'English' }, { id: 'ar', label: 'العربية' }], revision: 1 };
 const localeListeners = new Set<() => void>();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -25,6 +27,21 @@ window.fetch = async (url, init) => {
   fixture.requests.push({ ...body, url: String(url) });
   if (requestDelay) await sleep(requestDelay);
   if (body.action === 'snapshot') return Response.json({ ok: true, value: snapshot });
+  const processDocuments = (documents: any[] = []) => documents.map((file: any, index: number) => ({ id: `document-${index}-${file.name}`, name: file.name, bytes: atob(file.data).length, mediaType: file.mediaType || 'text/plain', sections: [{ reference: 'Line 1', text: atob(file.data) }], warnings: ['Fixture extraction warning'] }));
+  if (body.action === 'process-files') {
+    if (body.documents.some((file: any) => file.name.startsWith('bad'))) return Response.json({ ok: false, error: 'Fixture document validation failed' }, { status: 400 });
+    return Response.json({ ok: true, value: processDocuments(body.documents) });
+  }
+  if (body.action === 'start' || body.action === 'followup') {
+    if (failSend) return Response.json({ ok: false, error: 'Fixture send rejected; draft retained' }, { status: 400 });
+    if (body.action === 'start') {
+      const next = { ...structuredClone(session), id: `start-${snapshot.sessions.length}`, title: body.question || 'Attachment-only question', question: body.question, documents: processDocuments(body.documents), settings: body.settings, followUps: [], final: null };
+      snapshot.sessions.push(next); return Response.json({ ok: true, value: next });
+    }
+    const target = snapshot.sessions.find((item: any) => item.id === body.id);
+    target.followUps.push({ id: `followup-${target.followUps.length}`, text: body.message, documents: processDocuments(body.documents), images: [], startRound: target.round + 1, timestamp: Date.now() });
+    return Response.json({ ok: true, value: target });
+  }
   if (body.action === 'select') snapshot.activeId = body.id;
   else if (body.action === 'settings') snapshot.settings = structuredClone(body.settings);
   else if (body.action === 'rename') snapshot.sessions.find((s: any) => s.id === body.id).title = body.title;

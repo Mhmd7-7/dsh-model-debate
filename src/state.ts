@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { requestDiagnosticsSchema } from './diagnostics.js';
+import { documentSchema, type DocumentPolicy } from './document-state.js';
 
 const text = z.string().max(12000);
 export const identitySchema = z.object({ provider: z.string().min(1).max(200), model: z.string().min(1).max(300) }).strict();
@@ -61,10 +62,10 @@ export const taskSchema = z.object({ id: z.string(), participantId: z.string(), 
 export type Task = z.infer<typeof taskSchema>;
 export const issueSchema = z.object({ id: z.string(), claimId: z.string(), ownerId: z.string(), raisedBy: z.string(), text: z.string(), evidence: z.string(), verification: z.string(), resolved: z.boolean(), resolution: z.string().optional() });
 export const reviewSchema = z.object({ text: z.string().max(100000), provider: z.string(), model: z.string(), timestamp: z.number(), incomplete: z.boolean() });
-export const followUpSchema = z.object({ id: z.string(), text: z.string().max(30000), images: z.array(imageRefSchema).max(4).optional(), timestamp: z.number(), startRound: z.number().int().min(1), budgetStart: z.number().nonnegative() }).refine(turn => !!turn.text.trim() || !!turn.images?.length, 'A follow-up requires text or images');
+export const followUpSchema = z.object({ id: z.string(), text: z.string().max(30000), images: z.array(imageRefSchema).max(4).optional(), documents: z.array(documentSchema).max(40).optional(), timestamp: z.number(), startRound: z.number().int().min(1), budgetStart: z.number().nonnegative() }).refine(turn => !!turn.text.trim() || !!turn.images?.length || !!turn.documents?.length, 'A follow-up requires text or attachments');
 export type FollowUp = z.infer<typeof followUpSchema>;
 export const sessionSchema = z.object({
-  schemaVersion: z.literal(1), id: z.string(), title: z.string().max(160), question: z.string().max(30000), images: z.array(imageRefSchema).max(20).default([]), createdAt: z.number(), updatedAt: z.number(),
+  schemaVersion: z.literal(1), id: z.string(), title: z.string().max(160), question: z.string().max(30000), documents: z.array(documentSchema).max(40).optional(), images: z.array(imageRefSchema).max(20).default([]), createdAt: z.number(), updatedAt: z.number(),
   status: z.enum(['running', 'reviewing', 'completed', 'partial', 'stopped', 'interrupted']), settings: settingsSchema,
   messages: z.array(messageSchema), tasks: z.array(taskSchema), issues: z.array(issueSchema),
   followUps: z.array(followUpSchema).max(30).default([]), reviews: z.array(reviewSchema.extend({ afterRound: z.number().int().nonnegative() })).default([]),
@@ -79,7 +80,7 @@ export const presetSchema = z.object({ id: z.string(), name: z.string().min(1).m
 export type Preset = z.infer<typeof presetSchema>;
 export const preferencesSchema = z.object({ settings: settingsSchema, presets: z.array(presetSchema).max(100), activeId: z.string().nullable() });
 export type Preferences = z.infer<typeof preferencesSchema>;
-export interface Snapshot { imagePolicy?: ImagePolicy; models: ModelInfo[]; diagnostics: string[]; localOnly: boolean; settings: Settings; presets: Preset[]; sessions: DebateSession[]; activeId: string | null; }
+export interface Snapshot { documentPolicy?: DocumentPolicy; imagePolicy?: ImagePolicy; models: ModelInfo[]; diagnostics: string[]; localOnly: boolean; settings: Settings; presets: Preset[]; sessions: DebateSession[]; activeId: string | null; }
 export const defaults = (models: ModelInfo[] = []): Settings => ({
   participants: models.slice(0, 4).map((m, i) => ({ id: `p${i + 1}`, provider: m.provider, model: m.model, enabled: true, role: ['solver', 'critic', 'verifier', 'synthesizer'][i], instructions: '', options: {} })),
   mode: 'parallel', speakingOrder: 'configured', concurrency: 4, providerLimits: {}, maxRepliesPerParticipant: 8, maxReplies: 80, queueLimit: 40,

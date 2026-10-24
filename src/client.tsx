@@ -1,6 +1,7 @@
 import type { ReactNode, ComponentType } from 'react';
 import type { DebateSession, DebateMessage, EncodedImage, ImagePolicy, ImageRef, ModelInfo, Participant, Preset, Settings, Snapshot, Task } from './state.js';
 import { settingsSchema, schedulingWarnings } from './state.js';
+import type { DocumentAttachment, DocumentPolicy, EncodedDocument } from './document-state.js';
 import { readableText, participantLabels } from './content.js';
 import { createMarkdownRenderer, markdownStyleText } from './markdown.js';
 import { requestOperation, ClientRequestError } from './client-request.js';
@@ -29,6 +30,14 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
 type DraftImage = { id: string; encoded: EncodedImage; preview: string; bytes: number };
 type ImageDraftState = { images: DraftImage[]; reading: boolean; error: string | null };
+type DraftDocument = { id: string; name: string; bytes: number; status: 'processing' | 'ready' | 'error'; encoded?: EncodedDocument; processed?: DocumentAttachment; error?: string };
+type DocumentDraftState = { documents: DraftDocument[]; error: string | null };
+function effectiveDocumentPolicy(policy?: DocumentPolicy): DocumentPolicy {
+  const bounded = (value: number | undefined, ceiling: number) => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(ceiling, Math.floor(value))) : 0;
+  return { maxFiles: bounded(policy?.maxFiles, 20), maxFileBytes: bounded(policy?.maxFileBytes, 10485760), maxTotalBytes: bounded(policy?.maxTotalBytes, 20971520), maxConversationFiles: bounded(policy?.maxConversationFiles, 40), maxExtractedChars: bounded(policy?.maxExtractedChars, 200000), extensions: policy?.extensions.filter(extension => /^\.[a-z0-9]+$/i.test(extension)) ?? [] };
+}
+const documentsBlocked = (draft: DocumentDraftState) => draft.documents.some(file => file.status !== 'ready' || !file.encoded);
+const documentsProcessing = (draft: DocumentDraftState) => draft.documents.some(file => file.status === 'processing');
 function effectiveImagePolicy(policy?: ImagePolicy): ImagePolicy {
   const bounded = (value: number | undefined, ceiling: number) => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(ceiling, Math.floor(value))) : 0;
   return { available: policy?.available === true, maxImages: bounded(policy?.maxImages, MAX_IMAGES), maxImageBytes: bounded(policy?.maxImageBytes, MAX_IMAGE_BYTES), maxTotalBytes: bounded(policy?.maxTotalBytes, MAX_TOTAL_IMAGE_BYTES), mediaTypes: IMAGE_TYPES.filter(type => policy?.mediaTypes.includes(type)) };
@@ -88,11 +97,12 @@ window.__ModuleLoader__.load({
         // Closure-owned and session-keyed: drafts survive Chat/Debate slot unmounts.
         const followUpDrafts = new Map<string, string>();
         const followUpPending = new Set<string>();
+        const deletedSessionDrafts = new Set<string>();
         const emptyImageDraft: ImageDraftState = { images: [], reading: false, error: null };
         const followUpImages = new Map<string, ImageDraftState>();
         const getFollowUpImages = (id: string) => followUpImages.get(id) ?? emptyImageDraft;
         function setFollowUpImages(id: string, next: ImageDraftState) {
-          if (!alive) return;
+          if (!alive || deletedSessionDrafts.has(id)) return;
           followUpImages.delete(id);
           if (next.images.length || next.reading || next.error) followUpImages.set(id, next);
           // Bound retained drafts; never evict an in-flight read/submission.
@@ -105,6 +115,7 @@ window.__ModuleLoader__.load({
         const publishFollowUps = () => { if (alive) followUpListeners.forEach(listener => listener()); };
         const subscribeFollowUps = (listener: () => void) => { followUpListeners.add(listener); return () => { followUpListeners.delete(listener); }; };
         function setFollowUpDraft(id: string, text: string) {
+          if (!alive || deletedSessionDrafts.has(id)) return;
           followUpDrafts.delete(id);
           if (text) followUpDrafts.set(id, text.slice(0, MAX_FOLLOW_UP_CHARS));
           while (followUpDrafts.size > MAX_FOLLOW_UP_DRAFTS) followUpDrafts.delete(followUpDrafts.keys().next().value!);
@@ -166,13 +177,94 @@ window.__ModuleLoader__.load({
             if (alive) publishDraft({ images: before, reading: false, error: error instanceof Error ? error.message : t('Image read failed', { name: '' }) });
           }
         }
+        // Encoded document drafts live in memory only; process-files never durably uploads them.
+        const emptyDocumentDraft: DocumentDraftState = { documents: [], error: null };
+        let documentDraft = emptyDocumentDraft;
+        const followUpDocuments = new Map<string, DocumentDraftState>();
+        const documentListeners = new Set<() => void>();
+        const subscribeDocuments = (listener: () => void) => { documentListeners.add(listener); return () => { documentListeners.delete(listener); }; };
+        const getDocuments = (owner?: string) => owner ? followUpDocuments.get(owner) ?? emptyDocumentDraft : documentDraft;
+        function publishDocuments(next: DocumentDraftState, owner?: string) {
+          if (!alive || (owner && deletedSessionDrafts.has(owner))) return;
+          if (owner) {
+            if (next.documents.length || next.error) followUpDocuments.set(owner, next); else followUpDocuments.delete(owner);
+            for (const key of followUpDocuments.keys()) { if (followUpDocuments.size <= 30) break; if (!documentsProcessing(getDocuments(key)) && !followUpPending.has(key)) followUpDocuments.delete(key); }
+          } else documentDraft = next;
+          documentListeners.forEach(listener => listener());
+        }
+        function documentBatchError(files: readonly Pick<File, 'name' | 'size'>[], existing: readonly Pick<DraftDocument, 'name' | 'bytes'>[], policy: DocumentPolicy, owner?: string): string | null {
+          if (!policy.maxFiles || !policy.extensions.length) return t('Documents unavailable');
+          if (existing.length + files.length > policy.maxFiles) return t('Document count limit', { count: policy.maxFiles });
+          if ([...files, ...existing].some(file => !policy.extensions.some(extension => file.name.toLowerCase().endsWith(extension.toLowerCase())))) return t('Document type error', { extensions: policy.extensions.join(', ') });
+          if (files.some(file => !file.size || file.size > policy.maxFileBytes) || existing.some(file => !file.bytes || file.bytes > policy.maxFileBytes)) return t('Document size limit', { size: formatBytes(policy.maxFileBytes, ctx.locale.getSnapshot().active) });
+          if (existing.reduce((sum, file) => sum + file.bytes, 0) + files.reduce((sum, file) => sum + file.size, 0) > policy.maxTotalBytes) return t('Document total limit', { size: formatBytes(policy.maxTotalBytes, ctx.locale.getSnapshot().active) });
+          const session = owner ? view.snapshot?.sessions.find(session => session.id === owner) : undefined;
+          const savedCount = (session?.documents?.length ?? 0) + (session?.followUps.reduce((sum, turn) => sum + (turn.documents?.length ?? 0), 0) ?? 0);
+          if (savedCount + existing.length + files.length > policy.maxConversationFiles) return t('Document conversation limit', { count: policy.maxConversationFiles });
+          return null;
+        }
+        function readDocumentFile(file: File): Promise<EncodedDocument> {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader(); imageReaders.add(reader);
+            const fail = () => { imageReaders.delete(reader); reject(new Error(t('Document read failed', { name: file.name }))); };
+            reader.onerror = fail; reader.onabort = fail;
+            reader.onload = () => {
+              imageReaders.delete(reader);
+              if (typeof reader.result !== 'string' || !reader.result.includes(';base64,')) { fail(); return; }
+              const data = reader.result.slice(reader.result.indexOf(';base64,') + 8);
+              try { const decoded = atob(data); if (decoded.length !== file.size || btoa(decoded) !== data) { fail(); return; } } catch { fail(); return; }
+              resolve({ name: file.name, data, ...(file.type ? { mediaType: file.type } : {}) });
+            };
+            reader.readAsDataURL(file);
+          });
+        }
+        // Admission waits in memory before starting a timed request, including across selections/owners.
+        let documentProcessingQueue: Promise<void> = Promise.resolve();
+        async function addDocumentFiles(files: File[], policy: DocumentPolicy, owner?: string): Promise<void> {
+          if (!files.length || !alive || operationBusy || (owner && followUpPending.has(owner))) return;
+          const draft = getDocuments(owner);
+          const error = documentBatchError(files, draft.documents, policy, owner);
+          if (error) { publishDocuments({ ...draft, error }, owner); return; }
+          const rows: DraftDocument[] = files.map(file => ({ id: crypto.randomUUID(), name: file.name, bytes: file.size, status: 'processing' }));
+          publishDocuments({ documents: [...draft.documents, ...rows], error: null }, owner);
+          const processBatch = async () => {
+            for (const [index, file] of files.entries()) {
+              const row = rows[index];
+              const retained = () => alive && getDocuments(owner).documents.some(item => item.id === row.id);
+              // A queued file may be removed while earlier files are extracting.
+              if (!retained()) continue;
+              const update = (patch: Partial<DraftDocument>) => { const current = getDocuments(owner); if (retained()) publishDocuments({ ...current, documents: current.documents.map(item => item.id === row.id ? { ...item, ...patch } : item) }, owner); };
+              try {
+                const encoded = await readDocumentFile(file);
+                if (!retained()) continue;
+                // Start each request only after the previous extraction completes, so queue time cannot consume its timeout.
+                // Validate/extract each attachment before send, but send the raw bytes again on submission.
+                const processed = await request<DocumentAttachment[]>('process-files', { documents: [encoded] });
+                if (!Array.isArray(processed) || processed.length !== 1 || !Array.isArray(processed[0].sections) || !Array.isArray(processed[0].warnings)) throw new Error(t('Document processing failed'));
+                update({ encoded, processed: processed[0], status: 'ready', error: undefined });
+              } catch (error) { update({ status: 'error', error: error instanceof Error ? error.message : t('Document processing failed') }); }
+            }
+          };
+          const processing = documentProcessingQueue.then(processBatch);
+          documentProcessingQueue = processing.catch(() => {});
+          await processing;
+        }
+        function addAttachmentFiles(files: File[], imagePolicy: ImagePolicy, documentPolicy: DocumentPolicy, owner?: string): void {
+          // Route mixed batches separately so documents never fail image validation (or vice versa).
+          const images = files.filter(file => file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name));
+          const documents = files.filter(file => !images.includes(file));
+          if (images.length) void addImageFiles(images, imagePolicy, owner);
+          if (documents.length) void addDocumentFiles(documents, documentPolicy, owner);
+        }
         const publish = (next: ViewState) => { if (!alive) return; view = next; listeners.forEach(listener => listener()); };
         async function request<T = unknown>(action: string, fields: Record<string, unknown> = {}): Promise<T> {
           if (!alive) throw new Error('Plugin disposed');
           const controller = new AbortController();
           controllers.add(controller);
           try {
-            return await requestOperation<T>({ baseUrl: document.baseURI, action, fields, signal: controller.signal });
+            const fileCount = ['start', 'followup'].includes(action) && Array.isArray(fields.documents) ? Math.min(20, fields.documents.length) : 0;
+            // Re-validation extracts each file under its own 15s parser deadline before commit.
+            return await requestOperation<T>({ baseUrl: document.baseURI, action, fields, signal: controller.signal, ...(fileCount ? { timeoutMs: 30000 + fileCount * 15000 } : {}) });
           } finally { controllers.delete(controller); }
         }
         async function refresh(fresh = false): Promise<void> {
@@ -196,7 +288,7 @@ window.__ModuleLoader__.load({
         const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
         ctx.effect(() => {
           void refresh();
-          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; followUpDrafts.clear(); followUpImages.clear(); followUpPending.clear(); followUpListeners.clear(); operationListeners.clear(); listeners.clear(); };
+          return () => { alive = false; if (polling) clearInterval(polling); controllers.forEach(controller => controller.abort()); controllers.clear(); imageReaders.forEach(reader => reader.abort()); imageReaders.clear(); imageListeners.clear(); savedImageCache.clear(); imageDraft = { images: [], reading: false, error: null }; followUpDrafts.clear(); followUpImages.clear(); followUpDocuments.clear(); deletedSessionDrafts.clear(); documentDraft = emptyDocumentDraft; documentListeners.clear(); followUpPending.clear(); followUpListeners.clear(); operationListeners.clear(); listeners.clear(); };
         });
         function useLocale() { return useSyncExternalStore(fn => ctx.locale.subscribe(fn), () => ctx.locale.getSnapshot(), () => ctx.locale.getSnapshot()); }
         function Icon({ name = 'debate', size = 18 }: { name?: string; size?: number }) {
@@ -349,6 +441,18 @@ window.__ModuleLoader__.load({
           const publishDraft = (next: ImageDraftState) => owner ? setFollowUpImages(owner, next) : publishImageDraft(next);
           return <section className="mdb-image-composer" aria-label={t(owner ? 'Continuation images' : 'Question images')} aria-busy={images.reading}><input ref={input} className="mdb-sr-only" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" aria-label={t('Add images')} disabled={busy || images.reading || !policy.available} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; void addImageFiles(files, policy, owner); }}/><div className="mdb-image-toolbar"><Button icon="image" disabled={busy || images.reading || !policy.available} onClick={() => input.current?.click()}>{t('Add images')}</Button><small>{t('Image limits', { count: policy.maxImages, each: formatBytes(policy.maxImageBytes, locale.active), total: formatBytes(policy.maxTotalBytes, locale.active) })}</small>{images.images.length > 0 && <Button disabled={busy || images.reading} onClick={() => publishDraft({ images: [], reading: false, error: null })}>{t('Clear images')}</Button>}</div>{!policy.available && <small>{t('Images unavailable')}</small>}{images.images.length > 0 && <><div className="mdb-image-grid">{images.images.map((image, index) => <figure className="mdb-draft-image" key={image.id}><img src={image.preview} alt={image.encoded.name || `${t('Image')} ${index + 1}`}/><figcaption><strong dir="auto">{image.encoded.name || `${t('Image')} ${index + 1}`}</strong><small>{formatBytes(image.bytes, locale.active)}</small></figcaption><IconButton label={`${t('Remove image')}: ${image.encoded.name || index + 1}`} icon="close" disabled={busy || images.reading} onClick={() => publishDraft({ ...images, images: images.images.filter(item => item.id !== image.id), error: null })}/></figure>)}</div><p className="mdb-image-summary">{t('Image selection summary', { count: images.images.length, size: formatBytes(images.images.reduce((sum, image) => sum + image.bytes, 0), locale.active) })}</p></>}<p className="mdb-image-privacy">{t('Image privacy note')}</p><small>{t('Image input hint')}</small>{images.reading && <p role="status" aria-live="polite">{t('Reading images')}</p>}{images.error && <p className="mdb-error-text" role="alert">{images.error}</p>}</section>;
         }
+        function SavedDocuments({ documents = [], continuation = false }: { documents?: DocumentAttachment[]; continuation?: boolean }) {
+          const locale = useLocale();
+          if (!documents.length) return null;
+          return <section className="mdb-saved-documents" aria-label={t(continuation ? 'Continuation documents' : 'Question documents')}><h3>{t(continuation ? 'Continuation documents' : 'Question documents')} <span className="mdb-count">{documents.length}</span></h3><small>{t('Document excerpt note')}</small>{documents.map(file => <details className="mdb-saved-document" key={file.id}><summary><span dir="auto">{file.name}</span><small>{formatBytes(file.bytes, locale.active)}</small></summary>{file.warnings.length > 0 && <div className="mdb-inline-warning"><strong>{t('Document warnings')}</strong><ul>{file.warnings.map((warning, index) => <li dir="auto" key={index}>{warning}</li>)}</ul></div>}<small>{t('Extracted document text')}</small>{file.sections.map((section, index) => <section key={index}><h4 dir="auto">{section.reference}</h4><Plain>{section.text}</Plain></section>)}</details>)}</section>;
+        }
+        function AttachmentComposer({ images, imagePolicy, documents, documentPolicy, busy, owner }: { images: ImageDraftState; imagePolicy: ImagePolicy; documents: DocumentDraftState; documentPolicy: DocumentPolicy; busy: boolean; owner?: string }) {
+          const input = useRef<HTMLInputElement>(null);
+          const locale = useLocale();
+          const available = imagePolicy.available || !!documentPolicy.maxFiles;
+          const accept = [...(imagePolicy.available ? imagePolicy.mediaTypes : []), ...documentPolicy.extensions].join(',');
+          return <section className="mdb-attachment-composer" aria-label={t('Attachments')}><input ref={input} className="mdb-sr-only" type="file" multiple accept={accept} aria-label={t('Add attachments')} disabled={busy || !available} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; addAttachmentFiles(files, imagePolicy, documentPolicy, owner); }}/><div className="mdb-attachment-toolbar"><Button icon="plus" disabled={busy || !available} onClick={() => input.current?.click()}>{t('Add attachments')}</Button><small>{t('Attachment input hint')}</small></div><small>{t('Document limits', { count: documentPolicy.maxFiles, each: formatBytes(documentPolicy.maxFileBytes, locale.active), total: formatBytes(documentPolicy.maxTotalBytes, locale.active) })} · <bdi>{documentPolicy.extensions.join(', ')}</bdi></small>{documents.error && <p className="mdb-error-text" role="alert">{documents.error}</p>}{documents.documents.length > 0 && <ul className="mdb-document-list" aria-live="polite">{documents.documents.map(file => <li key={file.id} className={`mdb-document-draft mdb-document-${file.status}`}><div><strong dir="auto">{file.name}</strong><small>{formatBytes(file.bytes, locale.active)} · {t(file.status === 'processing' ? 'Processing document' : file.status === 'ready' ? 'Document ready' : 'Document error')}</small>{file.error && <Plain className="mdb-error-text">{file.error}</Plain>}{!!file.processed?.warnings.length && <details><summary>{t('Document warnings')}</summary><ul>{file.processed.warnings.map((warning, index) => <li key={index} dir="auto">{warning}</li>)}</ul></details>}</div><IconButton icon="close" label={`${t('Remove document')}: ${file.name}`} disabled={busy} onClick={() => { const current = getDocuments(owner); publishDocuments({ documents: current.documents.filter(item => item.id !== file.id), error: null }, owner); }}/></li>)}</ul>}<p className="mdb-document-privacy">{t('Document privacy note')}</p><ImageComposer draft={images} policy={imagePolicy} busy={busy} owner={owner}/></section>;
+        }
         function FollowUpComposer({ session, busy, act, notify, snapshot }: { session: DebateSession; busy: boolean; act(action: string, fields?: Record<string, unknown>): Promise<any>; notify(message: string): void; snapshot: Snapshot }) {
           const draft = useSyncExternalStore(subscribeFollowUps, () => followUpDrafts.get(session.id) || '', () => '');
           const sending = useSyncExternalStore(subscribeFollowUps, () => followUpPending.has(session.id), () => false);
@@ -356,8 +460,11 @@ window.__ModuleLoader__.load({
           const running = activeRun(session);
           const images = useSyncExternalStore(subscribeFollowUps, () => getFollowUpImages(session.id), () => emptyImageDraft);
           const policy = effectiveImagePolicy(snapshot.imagePolicy);
+          const documents = useSyncExternalStore(subscribeDocuments, () => getDocuments(session.id), () => emptyDocumentDraft);
+          const documentPolicy = effectiveDocumentPolicy(snapshot.documentPolicy);
           const disabled = busy || running || sending;
           const errors: string[] = [];
+          if (documents.documents.length) { const validation = documentBatchError([], documents.documents, documentPolicy, session.id); if (validation) errors.push(validation); }
           if (images.images.length) { const validation = validateImageBatch([], images.images, policy); if (validation) errors.push(validation); }
           if (images.images.length || session.images.length || session.followUps.some(turn => turn.images?.length)) {
             const enabled = session.settings.participants.filter(p => p.enabled);
@@ -368,16 +475,17 @@ window.__ModuleLoader__.load({
           const send = async () => {
             const text = followUpDrafts.get(session.id) || '';
             const attachments = getFollowUpImages(session.id);
-            if (busy || activeRun(session) || followUpPending.has(session.id) || attachments.reading || errors.length || (!text.trim() && !attachments.images.length)) return;
+            const files = getDocuments(session.id);
+            if (busy || activeRun(session) || followUpPending.has(session.id) || attachments.reading || documentsBlocked(files) || errors.length || (!text.trim() && !attachments.images.length && !files.documents.length)) return;
             followUpPending.add(session.id); publishFollowUps();
             try {
-              const result = await act('followup', { id: session.id, message: text, ...(attachments.images.length ? { images: attachments.images.map(image => image.encoded) } : {}) });
+              const result = await act('followup', { id: session.id, message: text, ...(attachments.images.length ? { images: attachments.images.map(image => image.encoded) } : {}), ...(files.documents.length ? { documents: files.documents.map(file => file.encoded!) } : {}) });
               // Only an accepted action clears this session's draft, including after unmount.
-              if (result) { setFollowUpDraft(session.id, ''); setFollowUpImages(session.id, emptyImageDraft); }
+              if (result) { setFollowUpDraft(session.id, ''); setFollowUpImages(session.id, emptyImageDraft); publishDocuments(emptyDocumentDraft, session.id); }
             } catch { notify(t('Follow-up send failed')); }
             finally { followUpPending.delete(session.id); publishFollowUps(); }
           };
-          return <form className="mdb-followup-composer" aria-labelledby={`${id}-title`} aria-busy={sending || images.reading} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!disabled) void addImageFiles(files, policy, session.id); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); if (!disabled) void addImageFiles(Array.from(event.dataTransfer.files), policy, session.id); }} onSubmit={event => { event.preventDefault(); void send(); }}><header><span className="mdb-followup-mark"><Icon name="debate"/></span><div><h2 id={`${id}-title`}>{t('Continue this debate')}</h2><p id={`${id}-context`}>{t('Follow-up context hint')}</p></div></header><label className="mdb-sr-only" htmlFor={id}>{t('Your follow-up')}</label><textarea id={id} dir="auto" rows={3} maxLength={MAX_FOLLOW_UP_CHARS} value={draft} disabled={disabled} aria-describedby={`${id}-context ${id}-hint`} placeholder={t('Follow-up placeholder')} onChange={event => setFollowUpDraft(session.id, event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !event.repeat) { event.preventDefault(); void send(); } }}/><footer><small id={`${id}-hint`} role={running ? 'status' : undefined}>{t(running ? 'Follow-up wait' : 'Follow-up keyboard hint')}</small><button type="submit" className="mdb-button mdb-button-primary" disabled={disabled || images.reading || !!errors.length || (!draft.trim() && !images.images.length)}><Icon name={sending ? 'clock' : 'play'}/><span>{t(sending ? 'Sending follow-up' : 'Send follow-up')}</span></button></footer><ImageComposer draft={images} policy={policy} busy={disabled} owner={session.id}/>{errors.length > 0 && <div role="alert" className="mdb-alert mdb-alert-error"><ul>{errors.map(error => <li key={error}>{error}</li>)}</ul></div>}<small className="mdb-followup-resource-note">{t('Follow-up resource hint')}</small><small>{t('Follow-up image hint')}</small></form>;
+          return <form className="mdb-followup-composer" aria-labelledby={`${id}-title`} aria-busy={sending || images.reading || documentsProcessing(documents)} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!disabled) void addAttachmentFiles(files, policy, documentPolicy, session.id); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); if (!disabled) void addAttachmentFiles(Array.from(event.dataTransfer.files), policy, documentPolicy, session.id); }} onSubmit={event => { event.preventDefault(); void send(); }}><header><span className="mdb-followup-mark"><Icon name="debate"/></span><div><h2 id={`${id}-title`}>{t('Continue this debate')}</h2><p id={`${id}-context`}>{t('Follow-up context hint')}</p></div></header><label className="mdb-sr-only" htmlFor={id}>{t('Your follow-up')}</label><textarea id={id} dir="auto" rows={3} maxLength={MAX_FOLLOW_UP_CHARS} value={draft} disabled={disabled} aria-describedby={`${id}-context ${id}-hint`} placeholder={t('Follow-up placeholder')} onChange={event => setFollowUpDraft(session.id, event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !event.repeat) { event.preventDefault(); void send(); } }}/><footer><small id={`${id}-hint`} role={running ? 'status' : undefined}>{t(running ? 'Follow-up wait' : 'Follow-up keyboard hint')}</small><button type="submit" className="mdb-button mdb-button-primary" disabled={disabled || images.reading || documentsBlocked(documents) || !!errors.length || (!draft.trim() && !images.images.length && !documents.documents.length)}><Icon name={sending ? 'clock' : 'play'}/><span>{t(sending ? 'Sending follow-up' : 'Send follow-up')}</span></button></footer><AttachmentComposer images={images} imagePolicy={policy} documents={documents} documentPolicy={documentPolicy} busy={disabled} owner={session.id}/>{errors.length > 0 && <div role="alert" className="mdb-alert mdb-alert-error"><ul>{errors.map(error => <li key={error}>{error}</li>)}</ul></div>}<small className="mdb-followup-resource-note">{t('Follow-up resource hint')}</small><small>{t('Follow-up image hint')}</small></form>;
         }
         function SessionView({ session: s, busy, act, onDialog, onLoad, notify, snapshot }: { session: DebateSession; busy: boolean; act(action: string, fields?: Record<string, unknown>): Promise<any>; onDialog(value: DialogState): void; onLoad(settings: Settings): void; notify(message: string): void; snapshot: Snapshot }) {
           const [copied, setCopied] = useState(false);
@@ -395,11 +503,11 @@ window.__ModuleLoader__.load({
           const cycleRound = Math.max(0, s.round - (followUps.at(-1)?.startRound ?? 1) + 1);
           // Include empty rounds so a follow-up stays visible even if no model replied.
           const transcriptRounds = Array.from(new Set([...s.messages.map(message => message.round), ...followUps.map(followUp => followUp.startRound), ...reviews.map(review => review.afterRound)])).sort((a, b) => a - b);
-          return <div className="mdb-session-view"><section className="mdb-run-heading"><div className="mdb-toolbar mdb-toolbar-wrap"><Status status={s.status}/><span className="mdb-muted">{t('Round')} {cycleRound}/{s.settings.rounds} · {t('Stage')}: {t(s.stage)}</span></div><h1 dir="auto">{s.title}</h1><details className="mdb-question-detail" open={s.question.length < 350}><summary>{t('Question label')}</summary><Plain>{s.question}</Plain></details><SessionImages session={s}/><Countdown session={s}/><div className="mdb-run-actions"><div className="mdb-toolbar mdb-toolbar-wrap">{running ? <Button icon="stop" className="mdb-button-danger" disabled={busy} onClick={() => onDialog({ kind: 'stop', id: s.id })}>{t('Stop')}</Button> : <><Button icon="spark" className="mdb-button-primary" title={t('Review hint')} disabled={busy || !s.messages.length} onClick={() => { void act('review', { id: s.id }); }}>{t('Review now')}</Button><Button icon="retry" title={t('Run again hint')} disabled={busy} onClick={() => { void act('rerun', { id: s.id }); }}>{t('Run again')}</Button></>}<details className="mdb-export"><summary><Icon name="download" size={16}/>{t('Export')}</summary><div><Button disabled={busy} onClick={() => { void exportRun('json'); }}>{t('Export JSON')}</Button><Button disabled={busy} onClick={() => { void exportRun('markdown'); }}>{t('Export Markdown')}</Button></div></details></div><small>{s.messages.length} {t('Messages')}</small></div>{s.stopReason && <Plain className="mdb-stop-reason">{s.stopReason}</Plain>}</section>
+          return <div className="mdb-session-view"><section className="mdb-run-heading"><div className="mdb-toolbar mdb-toolbar-wrap"><Status status={s.status}/><span className="mdb-muted">{t('Round')} {cycleRound}/{s.settings.rounds} · {t('Stage')}: {t(s.stage)}</span></div><h1 dir="auto">{s.title}</h1><details className="mdb-question-detail" open={s.question.length < 350}><summary>{t('Question label')}</summary><Plain>{s.question}</Plain></details><SessionImages session={s}/><SavedDocuments documents={s.documents}/><Countdown session={s}/><div className="mdb-run-actions"><div className="mdb-toolbar mdb-toolbar-wrap">{running ? <Button icon="stop" className="mdb-button-danger" disabled={busy} onClick={() => onDialog({ kind: 'stop', id: s.id })}>{t('Stop')}</Button> : <><Button icon="spark" className="mdb-button-primary" title={t('Review hint')} disabled={busy || !s.messages.length} onClick={() => { void act('review', { id: s.id }); }}>{t('Review now')}</Button><Button icon="retry" title={t('Run again hint')} disabled={busy} onClick={() => { void act('rerun', { id: s.id }); }}>{t('Run again')}</Button></>}<details className="mdb-export"><summary><Icon name="download" size={16}/>{t('Export')}</summary><div><Button disabled={busy} onClick={() => { void exportRun('json'); }}>{t('Export JSON')}</Button><Button disabled={busy} onClick={() => { void exportRun('markdown'); }}>{t('Export Markdown')}</Button></div></details></div><small>{s.messages.length} {t('Messages')}</small></div>{s.stopReason && <Plain className="mdb-stop-reason">{s.stopReason}</Plain>}</section>
             {s.final ? <section className="mdb-final"><header><div className="mdb-final-title"><span className="mdb-final-mark"><Icon name="spark" size={22}/></span><div><h2>{t('Final answer')}</h2><small dir="auto">{s.final.model} · {s.final.provider}</small></div></div><Button icon={copied ? 'check' : 'copy'} onClick={() => { void copy(); }}>{t(copied ? 'Copied' : 'Copy final')}</Button></header>{s.final.incomplete && <span className="mdb-badge mdb-badge-warn">{t('Incomplete')}</span>}<Markdown labels={participantLabels(s)}>{s.final.text}</Markdown><footer>{t('Final caveat')}</footer></section> : !running && <section className="mdb-no-final"><Icon name="spark"/><div><h3>{t('No final')}</h3><p>{t('No final hint')}</p></div></section>}
             {s.reviewError && <div className="mdb-alert mdb-alert-error"><Icon name="alert"/><div><strong>{t('Reviewer error')}</strong><Plain>{s.reviewError}</Plain></div></div>}
             <TaskActivity session={s}/><Issues session={s}/>
-            <details className="mdb-transcript" open={!s.final}><summary><h2>{t('Transcript')}</h2><span className="mdb-count">{s.messages.length}</span></summary>{s.messages.length === 0 && <div className="mdb-empty-transcript"><span className="mdb-orbit"><Icon size={28}/></span><h3>{t('Awaiting contributions')}</h3><p>{t('Awaiting hint')}</p></div>}{transcriptRounds.map(round => <React.Fragment key={round}><div className="mdb-round-separator"><span>{t('Round')} {round}</span><i/></div>{followUps.filter(followUp => followUp.startRound === round).map(followUp => <article key={followUp.id} className="mdb-followup-message"><header><span className="mdb-badge">{t('You')}</span><strong>{t('Follow-up message')}</strong><time dateTime={new Date(followUp.timestamp).toISOString()}>{new Date(followUp.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time></header><Plain>{followUp.text || t('Image-only follow-up')}</Plain>{!!followUp.images?.length && <section aria-label={t('Continuation images')}><h4>{t('Continuation images')}</h4><div className="mdb-image-grid">{followUp.images.map((image, imageIndex) => <SavedImage key={`${followUp.id}-${imageIndex}`} sessionId={s.id} followUpId={followUp.id} image={image} imageIndex={imageIndex}/>)}</div></section>}</article>)}{s.messages.filter(message => message.round === round).map(message => <MessageCard key={message.id} message={message} session={s}/>)}{reviews.filter(review => review.afterRound === round).map((review, index) => <details className="mdb-prior-review" key={`${review.timestamp}-${index}`}><summary><Icon name="spark" size={16}/><span>{t('Previous synthesis')}</span><small dir="auto">{review.model} · {review.provider}</small></summary><header><time dateTime={new Date(review.timestamp).toISOString()}>{new Date(review.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time>{review.incomplete && <span className="mdb-badge mdb-badge-warn">{t('Incomplete')}</span>}</header><Markdown labels={participantLabels(s)}>{review.text}</Markdown><small>{t('Final caveat')}</small></details>)}</React.Fragment>)}</details>
+            <details className="mdb-transcript" open={!s.final}><summary><h2>{t('Transcript')}</h2><span className="mdb-count">{s.messages.length}</span></summary>{s.messages.length === 0 && <div className="mdb-empty-transcript"><span className="mdb-orbit"><Icon size={28}/></span><h3>{t('Awaiting contributions')}</h3><p>{t('Awaiting hint')}</p></div>}{transcriptRounds.map(round => <React.Fragment key={round}><div className="mdb-round-separator"><span>{t('Round')} {round}</span><i/></div>{followUps.filter(followUp => followUp.startRound === round).map(followUp => <article key={followUp.id} className="mdb-followup-message"><header><span className="mdb-badge">{t('You')}</span><strong>{t('Follow-up message')}</strong><time dateTime={new Date(followUp.timestamp).toISOString()}>{new Date(followUp.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time></header><Plain>{followUp.text || t(followUp.documents?.length ? 'Attachment-only follow-up' : 'Image-only follow-up')}</Plain><SavedDocuments documents={followUp.documents} continuation/>{!!followUp.images?.length && <section aria-label={t('Continuation images')}><h4>{t('Continuation images')}</h4><div className="mdb-image-grid">{followUp.images.map((image, imageIndex) => <SavedImage key={`${followUp.id}-${imageIndex}`} sessionId={s.id} followUpId={followUp.id} image={image} imageIndex={imageIndex}/>)}</div></section>}</article>)}{s.messages.filter(message => message.round === round).map(message => <MessageCard key={message.id} message={message} session={s}/>)}{reviews.filter(review => review.afterRound === round).map((review, index) => <details className="mdb-prior-review" key={`${review.timestamp}-${index}`}><summary><Icon name="spark" size={16}/><span>{t('Previous synthesis')}</span><small dir="auto">{review.model} · {review.provider}</small></summary><header><time dateTime={new Date(review.timestamp).toISOString()}>{new Date(review.timestamp).toLocaleString(ctx.locale.getSnapshot().active, { dateStyle: 'short', timeStyle: 'short' })}</time>{review.incomplete && <span className="mdb-badge mdb-badge-warn">{t('Incomplete')}</span>}</header><Markdown labels={participantLabels(s)}>{review.text}</Markdown><small>{t('Final caveat')}</small></details>)}</React.Fragment>)}</details>
             <details className="mdb-run-details"><summary>{t('Run details')}</summary><div className="mdb-usage"><h3>{t('Usage')}</h3><dl><div><dt>{t('Input tokens')}</dt><dd>{s.usage.inputTokens.toLocaleString()}</dd></div><div><dt>{t('Output tokens')}</dt><dd>{s.usage.outputTokens.toLocaleString()}</dd></div><div><dt>{t('Budget accounted')}</dt><dd>{s.budgetUsed.toLocaleString()}{s.budgetEstimated && <small> · {t('Estimated')}</small>}</dd></div></dl>{s.usageUnavailable && <small>{t('Usage unavailable')}</small>}{s.compression.length > 0 && <p>{t('Context compressed')} · {s.compression.length} {t('Compression events')}</p>}</div><details><summary>{t('Original settings')}</summary><p>{t('Original settings hint')}</p><Button onClick={() => onLoad(s.settings)}>{t('Load run settings')}</Button><pre dir="ltr">{JSON.stringify(s.settings, null, 2)}</pre></details><details><summary>{t('Tasks')}</summary>{s.requests.map((item, index) => <details key={`${item.taskId}-${index}`}><summary dir="auto">{item.config.model} · {t('Attempt')} {item.attempt}</summary><Plain>{item.system}</Plain><Plain>{item.prompt}</Plain><pre dir="ltr">{JSON.stringify(item.config, null, 2)}</pre></details>)}</details></details>
             <FollowUpComposer session={s} busy={busy} act={act} notify={notify} snapshot={snapshot}/>
           </div>;
@@ -419,11 +527,13 @@ window.__ModuleLoader__.load({
           const rtl = locale.active.startsWith('ar');
           const snapshot = state.snapshot;
           const [draft, setDraft] = useState<Settings | null>(() => settingsDraft);
-          const [question, setQuestion] = useState(() => composeDraft);
+          const question = useSyncExternalStore(subscribeDocuments, () => composeDraft, () => '');
+          const setQuestion = (value: string) => { composeDraft = value; documentListeners.forEach(listener => listener()); };
           const images = useSyncExternalStore(subscribeImages, () => imageDraft, () => imageDraft);
           const imagePolicy = effectiveImagePolicy(snapshot?.imagePolicy);
+          const documents = useSyncExternalStore(subscribeDocuments, () => documentDraft, () => emptyDocumentDraft);
+          const documentPolicy = effectiveDocumentPolicy(snapshot?.documentPolicy);
           useEffect(() => { settingsDraft = draft; }, [draft]);
-          useEffect(() => { composeDraft = question; }, [question]);
           const busy = useSyncExternalStore(subscribeOperation, () => operationBusy, () => false);
           const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
           const [dialog, setDialog] = useState<DialogState>(null);
@@ -454,6 +564,7 @@ window.__ModuleLoader__.load({
             if (new Set(enabled.map(modelKey)).size !== enabled.length) errors.push(t('Duplicate identity'));
             if ([...enabled, ...(settings.reviewer ? [settings.reviewer] : [])].some(p => !snapshot.models.some(m => modelKey(m) === modelKey(p)))) errors.push(t('Unavailable model error'));
             if (enabled.some(p => p.options.reasoningEffort && !snapshot.models.find(m => modelKey(m) === modelKey(p))?.reasoningEfforts.includes(p.options.reasoningEffort))) errors.push(t('Unsupported reasoning'));
+            if (documents.documents.length) { const documentError = documentBatchError([], documents.documents, documentPolicy); if (documentError) errors.push(documentError); }
             if (images.images.length) {
               const imageError = validateImageBatch([], images.images, imagePolicy);
               if (imageError) errors.push(imageError);
@@ -462,7 +573,7 @@ window.__ModuleLoader__.load({
               if (settings.tokenBudget !== null) errors.push(t('Image token budget unsupported'));
             }
             return Array.from(new Set(errors));
-          }, [settings, snapshot?.models, snapshot?.imagePolicy, images.images, locale.revision]);
+          }, [settings, snapshot?.models, snapshot?.imagePolicy, snapshot?.documentPolicy, images.images, documents.documents, locale.revision]);
           const warnings = useMemo(() => settings ? schedulingWarnings(settings) : [], [settings]);
           const notify = (text: string) => setNotice({ text });
           async function act(action: string, fields: Record<string, unknown> = {}): Promise<any> {
@@ -470,9 +581,14 @@ window.__ModuleLoader__.load({
             setOperationBusy(true); setNotice(null);
             try {
               const result = await request<any>(action, fields);
-              if (action === 'start' && result?.id) publishImageDraft({ images: [], reading: false, error: null });
+              if (action === 'delete' && typeof fields.id === 'string') {
+                deletedSessionDrafts.add(fields.id);
+                followUpDrafts.delete(fields.id); followUpImages.delete(fields.id); followUpDocuments.delete(fields.id); followUpPending.delete(fields.id);
+                publishFollowUps(); documentListeners.forEach(listener => listener());
+              }
+              if (action === 'start' && result?.id) { publishImageDraft({ images: [], reading: false, error: null }); publishDocuments(emptyDocumentDraft); composeDraft = ''; setQuestion(''); }
               // Acceptance is independent of a later snapshot refresh; do not leave an already-sent message in the draft.
-              if (action === 'followup' && result?.id) { setFollowUpDraft(result.id, ''); setFollowUpImages(result.id, emptyImageDraft); }
+              if (action === 'followup' && result?.id) { setFollowUpDraft(result.id, ''); setFollowUpImages(result.id, emptyImageDraft); publishDocuments(emptyDocumentDraft, result.id); }
               if (['start', 'rerun'].includes(action) && result?.id) await request('select', { id: result.id });
               if (action !== 'export') await refresh(true);
               return result === undefined ? true : result;
@@ -488,10 +604,9 @@ window.__ModuleLoader__.load({
           const newDebate = async () => { const result = await act('select', { id: null }); if (result) { setHistoryOpen(false); setSettingsOpen(false); setAttempted(false); composerRef.current?.focus(); } };
           const start = async () => {
             setAttempted(true);
-            if (busy || imageDraft.reading) return;
-            if (!question.trim() || validation.length || !settings) { if (validation.length) setSettingsOpen(true); else composerRef.current?.focus(); return; }
-            const result = await act('start', { question: question.trim(), settings, ...(images.images.length ? { images: images.images.map(image => image.encoded) } : {}) });
-            if (result) publishImageDraft({ images: [], reading: false, error: null });
+            if (busy || imageDraft.reading || documentsBlocked(documentDraft)) return;
+            if ((!question.trim() && !images.images.length && !documents.documents.length) || validation.length || !settings) { if (validation.length) setSettingsOpen(true); else composerRef.current?.focus(); return; }
+            await act('start', { question: question.trim(), settings, ...(images.images.length ? { images: images.images.map(image => image.encoded) } : {}), ...(documents.documents.length ? { documents: documents.documents.map(file => file.encoded!) } : {}) });
           };
           const onApply = async (preset: Preset) => { const result = await act('preset-apply', { id: preset.id }); if (result) { setDraft(clone(preset.settings)); setPresetId(preset.id); notify(t('Preset applied')); } };
           const confirmDialog = async (name: string) => {
@@ -519,7 +634,8 @@ window.__ModuleLoader__.load({
             <div className="mdb-mobile-tabs"><Button icon="debate" aria-expanded={historyOpen} onClick={() => { setHistoryOpen(!historyOpen); setSettingsOpen(false); }}>{t('History')}</Button><Button icon="plus" disabled={busy} onClick={() => { void newDebate(); }}>{t('New debate')}</Button><Button icon="settings" aria-expanded={settingsOpen} onClick={() => { setSettingsOpen(!settingsOpen); setHistoryOpen(false); }}>{t('Settings')}</Button></div>
             <div className="mdb-workspace"><aside className="mdb-history" aria-label={t('History')}><Button icon="plus" className="mdb-button-primary mdb-new-debate" disabled={busy} onClick={() => { void newDebate(); }}>{t('New debate')}</Button><div className="mdb-history-heading"><h2>{t('History')}</h2><span>{snapshot.sessions.length}</span></div>{snapshot.sessions.length > 5 && <input className="mdb-history-search" type="search" placeholder={t('Search history')} aria-label={t('Search history')} value={search} onChange={event => setSearch(event.target.value)}/>}<nav aria-label={t('History')}>{histories.map(session => <div key={session.id} className={`mdb-history-item ${session.id === snapshot.activeId ? 'mdb-history-active' : ''}`}><button type="button" className="mdb-history-select" aria-current={session.id === snapshot.activeId ? 'page' : undefined} disabled={busy} onClick={() => { void act('select', { id: session.id }); setHistoryOpen(false); }}><span className="mdb-history-title" dir="auto">{session.title || t('Untitled debate')}</span><span className="mdb-history-meta"><Status status={session.status}/><time>{new Date(session.createdAt).toLocaleDateString(locale.active, { month: 'short', day: 'numeric' })}</time></span></button><div className="mdb-history-actions"><IconButton icon="edit" label={`${t('Rename')}: ${session.title}`} disabled={busy || activeRun(session)} onClick={() => setDialog({ kind: 'rename', id: session.id, name: session.title })}/><IconButton icon="trash" label={`${t('Delete')}: ${session.title}`} disabled={busy || activeRun(session)} onClick={() => setDialog({ kind: 'delete', id: session.id, name: session.title })}/></div></div>)}</nav>{snapshot.sessions.length === 0 && <div className="mdb-history-empty"><Icon size={25}/><p>{t('No debates yet')}</p></div>}<footer>{t('History hint')}</footer></aside>
               <main className="mdb-main" aria-label={t('Model Debate')}><div className="mdb-main-inner">{(notice || state.error) && <div className={`mdb-alert ${notice?.error || state.error ? 'mdb-alert-error' : 'mdb-alert-success'}`} role={notice?.error || state.error ? 'alert' : 'status'}><Icon name={notice?.error || state.error ? 'alert' : 'check'}/><Plain>{notice?.text || state.error}</Plain>{state.error ? <Button onClick={() => { void refresh(); }}>{t('Retry')}</Button> : <IconButton icon="close" label={t('Dismiss')} onClick={() => setNotice(null)}/>}</div>}
-                {selected ? <SessionView key={selected.id} session={selected} snapshot={snapshot} busy={busy} act={act} onDialog={setDialog} onLoad={value => { setDraft(clone(value)); setSettingsOpen(true); }} notify={notify}/> : <div className="mdb-compose"><div className="mdb-hero"><span className="mdb-hero-symbol"><Icon size={38}/><span className="mdb-hero-mini"><Icon name="spark" size={17}/></span></span><p className="mdb-eyebrow">{t('Workspace eyebrow')}</p><h1>{t('Workspace title')}</h1><p>{t('Workspace subtitle')}</p></div><div className="mdb-compose-stats"><button type="button" onClick={() => setSettingsOpen(true)}><strong>{settings.participants.filter(p => p.enabled).length}</strong><span>{t('Enabled participants')}</span></button><button type="button" onClick={() => setSettingsOpen(true)}><strong>{settings.rounds}</strong><span>{t('Rounds')}</span></button><button type="button" onClick={() => setSettingsOpen(true)}><strong>{t(settings.mode)}</strong><span>{t('Mode')}</span></button></div><form className="mdb-composer" onSubmit={event => { event.preventDefault(); void start(); }} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!busy) void addImageFiles(files, imagePolicy); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); if (!busy) void addImageFiles(Array.from(event.dataTransfer.files), imagePolicy); }}><label htmlFor="mdb-question">{t('Question label')}</label><textarea ref={composerRef} id="mdb-question" dir="auto" rows={7} maxLength={30000} value={question} placeholder={t('Question placeholder')} onChange={event => setQuestion(event.target.value)} aria-invalid={attempted && !question.trim()} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void start(); } }}/><ImageComposer draft={images} policy={imagePolicy} busy={busy}/><footer><small>{t('Question hint')}</small><button type="submit" className="mdb-button mdb-button-primary" disabled={busy || images.reading || !!validation.length || !snapshot.models.length}><Icon name="play"/>{t(images.reading ? 'Reading images' : busy ? 'Starting' : 'Start debate')}</button></footer></form>{attempted && !question.trim() && <p className="mdb-error-text" role="alert">{t('Question required')}</p>}
+                {selected ? <SessionView key={selected.id} session={selected} snapshot={snapshot} busy={busy} act={act} onDialog={setDialog} onLoad={value => { setDraft(clone(value)); setSettingsOpen(true); }} notify={notify}/> : <div className="mdb-compose"><div className="mdb-hero"><span className="mdb-hero-symbol"><Icon size={38}/><span className="mdb-hero-mini"><Icon name="spark" size={17}/></span></span><p className="mdb-eyebrow">{t('Workspace eyebrow')}</p><h1>{t('Workspace title')}</h1><p>{t('Workspace subtitle')}</p></div><div className="mdb-compose-stats"><button type="button" onClick={() => setSettingsOpen(true)}><strong>{settings.participants.filter(p => p.enabled).length}</strong><span>{t('Enabled participants')}</span></button><button type="button" onClick={() => setSettingsOpen(true)}><strong>{settings.rounds}</strong><span>{t('Rounds')}</span></button><button type="button" onClick={() => setSettingsOpen(true)}><strong>{t(settings.mode)}</strong><span>{t('Mode')}</span></button></div><form className="mdb-composer" onSubmit={event => { event.preventDefault(); void start(); }} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!busy) void addAttachmentFiles(files, imagePolicy, documentPolicy); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); if (!busy) void addAttachmentFiles(Array.from(event.dataTransfer.files), imagePolicy, documentPolicy); }}><label htmlFor="mdb-question">{t('Question label')}</label><textarea ref={composerRef} id="mdb-question" dir="auto" rows={7} maxLength={30000} value={question} placeholder={t('Question placeholder')} onChange={event => setQuestion(event.target.value)} aria-invalid={attempted && !question.trim() && !images.images.length && !documents.documents.length} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void start(); } }}/><AttachmentComposer images={images} imagePolicy={imagePolicy} documents={documents} documentPolicy={documentPolicy} busy={busy}/>
+<footer><small>{t('Question hint')}</small><button type="submit" className="mdb-button mdb-button-primary" disabled={busy || images.reading || documentsBlocked(documents) || !!validation.length || !snapshot.models.length}><Icon name="play"/>{t(images.reading ? 'Reading images' : busy ? 'Starting' : 'Start debate')}</button></footer></form>{attempted && !question.trim() && !images.images.length && !documents.documents.length && <p className="mdb-error-text" role="alert">{t('Question required')}</p>}
                   {validation.length > 0 && <div className="mdb-alert mdb-alert-warn"><Icon name="alert"/><div><strong>{t('Validation errors')}</strong><ul>{validation.map(error => <li key={error}>{error}</li>)}</ul><button type="button" className="mdb-text-button" onClick={() => setSettingsOpen(true)}>{t('Settings')}</button></div></div>}
                   {warnings.length > 0 && <details className="mdb-scheduling"><summary>{t('Scheduling warnings')} <span className="mdb-count">{warnings.length}</span></summary><ul>{warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></details>}
                   <p className="mdb-model-policy">{snapshot.localOnly && <><Icon name="check" size={15}/><strong>{t('Local only')}</strong> · </>}{t('Models policy')}</p>{snapshot.models.length < 2 && <div className="mdb-alert mdb-alert-warn"><Icon name="alert"/><div><strong>{t('No models')}</strong><p>{t('No models hint')}</p><Button icon="retry" onClick={() => { void refresh(); }}>{t('Refresh')}</Button></div></div>}
